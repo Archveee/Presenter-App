@@ -1,7 +1,9 @@
 import pathlib
+import subprocess
+import shutil
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QPushButton, QFrame, QSplitter, QGridLayout, QFileDialog)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QImage, QKeySequence, QShortcut
 from app.core.state_manager import StateManager
 from app.workers.camera_worker import CameraWorker
@@ -9,6 +11,10 @@ from app.workers.camera_worker import CameraWorker
 class DashboardWindow(QMainWindow):
     def __init__(self, state_manager: StateManager):
         super().__init__()
+        
+        # Paksa jendela selalu di atas pada X11/Qt[cite: 4]
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        
         self.state = state_manager
         self.setWindowTitle("AI Presenter Control")
         self.setMinimumSize(1240, 820)
@@ -24,7 +30,7 @@ class DashboardWindow(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(16)
 
-        # 1. Top Header
+        # 1. Top Header[cite: 4]
         header_layout = QHBoxLayout()
         title = QLabel("AI PRESENTER CONTROL")
         title.setProperty("class", "HeaderLabel")
@@ -41,11 +47,11 @@ class DashboardWindow(QMainWindow):
         header_layout.addWidget(btn_open_pptx)
         main_layout.addLayout(header_layout)
 
-        # 2. Main Content Splitter
+        # 2. Main Content Splitter[cite: 4]
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter, 1)
 
-        # Left Panel
+        # Left Panel[cite: 4]
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -59,7 +65,7 @@ class DashboardWindow(QMainWindow):
         left_layout.addWidget(self.control_card)
         splitter.addWidget(left_panel)
 
-        # Center Panel (Slides + Thumbnails)
+        # Center Panel (Slides + Thumbnails)[cite: 4]
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -71,7 +77,7 @@ class DashboardWindow(QMainWindow):
         center_layout.addWidget(self.next_slide_card, 1)
         splitter.addWidget(center_panel)
 
-        # Right Panel (Speaker Notes)
+        # Right Panel (Speaker Notes)[cite: 4]
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -86,11 +92,11 @@ class DashboardWindow(QMainWindow):
         splitter.addWidget(right_panel)
         splitter.setSizes([340, 480, 420])
 
-        # Keyboard Shortcuts untuk kontrol manual cepat
+        # Keyboard Shortcuts untuk kontrol manual cepat[cite: 4]
         QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.state.next_slide(trigger_keyboard=False))
         QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.state.prev_slide(trigger_keyboard=False))
 
-        # Connect State Signals
+        # Connect State Signals[cite: 4]
         self.state.security_status_changed.connect(self.update_security_ui)
         self.state.slide_changed.connect(self.update_slide_ui)
         self.state.gesture_feedback.connect(self.update_gesture_feedback)
@@ -99,7 +105,7 @@ class DashboardWindow(QMainWindow):
         if self.state.total_slides > 0:
             self.state._emit_slide_update()
 
-        # Start Camera Worker
+        # Start Camera Worker[cite: 4]
         self.camera_worker = CameraWorker(camera_index=0)
         self.camera_worker.frame_ready.connect(self.update_camera_frame)
         self.camera_worker.camera_status.connect(self.update_camera_status)
@@ -107,6 +113,16 @@ class DashboardWindow(QMainWindow):
         self.camera_worker.gesture_detected.connect(self.state.handle_gesture)
         self.camera_worker.face_authenticated.connect(self.state.handle_face_auth)
         self.camera_worker.start()
+
+        # Terapkan flag wmctrl "above" setelah jendela ter-render
+        QTimer.singleShot(300, self._enforce_always_on_top)
+
+    def _enforce_always_on_top(self):
+        if shutil.which("wmctrl"):
+            subprocess.Popen(
+                ["wmctrl", "-r", "AI Presenter Control", "-b", "add,above"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
 
     def _create_card(self, title: str, content_widget: QWidget) -> QFrame:
         frame = QFrame()
@@ -162,7 +178,7 @@ class DashboardWindow(QMainWindow):
         self.lbl_next_thumb.setAlignment(Qt.AlignCenter)
         self.lbl_next_thumb.setFixedSize(160, 100)
         self.lbl_next_thumb.setStyleSheet("background-color: #181B20; border-radius: 6px;")
-        self.next_slide_label = QLabel("-")
+        self.next_slide_label = QLabel("- ")
         self.next_slide_label.setWordWrap(True)
         layout.addWidget(self.lbl_next_thumb)
         layout.addWidget(self.next_slide_label, 1)
@@ -197,7 +213,7 @@ class DashboardWindow(QMainWindow):
         if file_path:
             self.state.load_presentation(file_path)
 
-    # --- UI Update Slots ---
+    # --- UI Update Slots ---[cite: 4]
     def update_camera_frame(self, qt_image: QImage):
         pixmap = QPixmap.fromImage(qt_image)
         scaled = pixmap.scaled(self.lbl_camera_feed.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)

@@ -1,4 +1,7 @@
 import logging
+import subprocess
+import shutil
+import time
 import pyautogui
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal
@@ -21,6 +24,8 @@ class StateManager(QObject):
         self.current_index = 1
         self.slides = []
         self.total_slides = 0
+        # Class resmi milik aplikasi desktop OnlyOffice di Arch Linux
+        self.target_window_class = "DesktopEditors"
         
     def load_presentation(self, file_path: str):
         path_obj = Path(file_path)
@@ -62,7 +67,6 @@ class StateManager(QObject):
             self.gesture_feedback.emit("IGNORED - Gesture Paused")
             return
 
-        # Final Security Gate: Periksa tepat sebelum eksekusi perintah
         if self.security_state != "UNLOCKED":
             self.gesture_feedback.emit(f"BLOCKED ({event.gesture_type}) - {self.security_state}")
             return
@@ -79,16 +83,67 @@ class StateManager(QObject):
             self.current_index += 1
             self._emit_slide_update()
             if trigger_keyboard:
-                try: pyautogui.press("right")
-                except Exception as e: logger.error(f"Keyboard error: {e}")
+                self._send_presentation_key("right")
             
     def prev_slide(self, trigger_keyboard: bool = False):
         if self.current_index > 1:
             self.current_index -= 1
             self._emit_slide_update()
             if trigger_keyboard:
-                try: pyautogui.press("left")
-                except Exception as e: logger.error(f"Keyboard error: {e}")
+                self._send_presentation_key("left")
+
+    def _send_presentation_key(self, direction: str):
+        """Cari jendela slideshow berdasarkan class DesktopEditors, tekan panah, lalu kembali ke Dashboard."""
+        try:
+            key_name = "Right" if direction == "right" else "Left"
+            
+            if shutil.which("xdotool"):
+                # 1. Cari semua jendela milik OnlyOffice berdasarkan --class (menangkap editor & layar slideshow)
+                win_ids = subprocess.check_output(
+                    ["xdotool", "search", "--onlyvisible", "--class", self.target_window_class],
+                    timeout=1
+                ).decode().splitlines()
+                
+                if win_ids:
+                    # Jendela slideshow fullscreen selalu berada di urutan teratas (indeks terakhir)
+                    slideshow_id = win_ids[-1]
+                    subprocess.run(
+                        ["xdotool", "windowactivate", "--sync", slideshow_id],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+                    )
+                    time.sleep(0.08)
+                    subprocess.run(
+                        ["xdotool", "key", "--clearmodifiers", key_name],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+                    )
+                    time.sleep(0.08)
+                else:
+                    logger.warning("Jendela OnlyOffice (DesktopEditors) tidak ditemukan!")
+
+                # 2. Kembalikan fokus & raise jendela AI Presenter Control
+                ai_ids = subprocess.check_output(
+                    ["xdotool", "search", "--onlyvisible", "--name", "AI Presenter Control"],
+                    timeout=1
+                ).decode().splitlines()
+                
+                if ai_ids:
+                    subprocess.run(
+                        ["xdotool", "windowactivate", ai_ids[-1]],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+                    )
+            else:
+                pyautogui.press(direction)
+
+            # 3. Kunci kembali status Always-on-Top
+            if shutil.which("wmctrl"):
+                subprocess.Popen(
+                    ["wmctrl", "-r", "AI Presenter Control", "-b", "add,above"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                
+            logger.info(f"Tombol '{direction}' dikirim ke slideshow OnlyOffice")
+        except Exception as e:
+            logger.error(f"Gagal mengirim input keyboard: {e}")
             
     def _emit_slide_update(self):
         if not self.slides:

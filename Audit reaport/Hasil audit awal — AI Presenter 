@@ -1,0 +1,324 @@
+Hasil audit awal — AI Presenter Control
+Saya sudah memeriksa source code yang tersedia pada repository Archveee/Presenter-App, termasuk main.py, config.yaml, StateManager, PPTXParser, ThumbnailService, DashboardWindow, CameraWorker, FaceService, dan GestureService.
+
+Temuan terpenting: placeholder [Text Preview Mode] bukan pertama-tama masalah QPixmap. Dalam main_window.py, teks tersebut hanya ditampilkan ketika current.image_path kosong. Artinya, alur sebelumnya belum berhasil menyediakan path gambar thumbnail untuk slide tersebut.
+
+Alur yang seharusnya berjalan adalah:
+presentasi.pptx
+      │
+      ▼
+PPTXParser.parse()
+      │
+      ├── Membaca judul dan speaker notes
+      │
+      ▼
+ThumbnailService.generate_thumbnails()
+      │
+      ├── Mencari PDF pendamping
+      ├── Memeriksa pdftoppm
+      ├── Merender halaman PDF menjadi PNG
+      └── Mengembalikan daftar path PNG
+      │
+      ▼
+SlideInfo.image_path
+      │
+      ▼
+StateManager.slide_changed
+      │
+      ▼
+DashboardWindow.update_slide_ui()
+      │
+      ▼
+QPixmap → QLabel
+
+
+Pada implementasi sekarang, ada tiga kondisi eksplisit yang membuat ThumbnailService langsung mengembalikan daftar kosong: PPTX tidak ditemukan, PDF dengan nama dasar yang sama tidak ditemukan, atau executable pdftoppm tidak tersedia. Kegagalan proses render juga ditangkap dan dikembalikan sebagai daftar kosong. Karena pesan error pdftoppm dibuang ke DEVNULL, penyebab sebenarnya sulit diketahui.
+
+Jadi, titik pertama yang harus diperbaiki adalah ThumbnailService dan PPTXParser. Perbaikan pemuatan dan penskalaan QPixmap tetap diperlukan, tetapi tidak akan mengatasi placeholder selama image_path masih kosong.
+1. Daftar temuan audit
+Berikut temuan utama berdasarkan kode yang diperiksa.
+Prioritas	File/modul	Temuan	Dampak
+Critical	camera_worker.py	Tidak menyediakan stop()	Aplikasi bermasalah ketika ditutup
+Critical	thumbnail_service.py	Error Poppler disembunyikan	Penyebab thumbnail gagal sulit diketahui
+High	thumbnail_service.py	Cache menggunakan working directory dan fingerprint lemah	Cache salah lokasi atau thumbnail lama digunakan
+High	pptx_parser.py	Kegagalan thumbnail dan parsing tidak dipisahkan	Informasi error hilang
+High	main_window.py	Thumbnail hanya di-scale satu kali	Gambar dapat berukuran terlalu kecil ketika UI pertama kali ditampilkan
+High	state_manager.py	Tidak memilih jendela target untuk input keyboard	Gestur belum tentu mengendalikan ONLYOFFICE
+High	requirements.txt	Hanya berisi PySide6	Instalasi bersih tidak mempunyai seluruh dependensi
+Medium	gesture_service.py	Buffer hanya 15 frame	Tidak konsisten dengan durasi maksimal gesture 1,2 detik
+Medium	gesture_service.py	Belum ada smoothing posisi tangan yang memadai	Gerakan kecil dapat memicu deteksi keliru
+Medium	face_service.py	Path dan parameter autentikasi hardcoded	Konfigurasi tidak dapat mengendalikan perilaku sebenarnya
+Medium	camera_worker.py	Penanganan camera disconnect dan cleanup belum lengkap	Status keamanan dapat tertinggal
+Medium	main.py	Menggunakan path relatif dari working directory	Berpotensi gagal saat dijalankan melalui desktop launcher
+
+Masalah khusus integrasi ONLYOFFICE
+Ada satu persoalan arsitektur yang perlu diperhatikan.
+
+Pada kode awal:
+pyautogui.press("right")
+
+
+
+Perintah tersebut mengirim tombol ke aplikasi yang sedang aktif, bukan secara otomatis kepada ONLYOFFICE.
+
+Selain itu, aplikasi awal menggunakan shortcut panah kiri/kanan pada jendelanya sendiri. Hal ini berpotensi menimbulkan perubahan indeks slide dua kali ketika input keyboard sintetis diterima oleh jendela AI Presenter.
+
+Dalam patch, saya mengubah shortcut manual menjadi Ctrl+Right dan Ctrl+Left, serta menambahkan opsi aktivasi jendela target menggunakan wmctrl.
+
+Untuk Linux, perlu diingat bahwa jalur input PyAutoGUI menggunakan X11/Xlib. Pengiriman input global tidak dijamin bekerja pada sesi Wayland murni.
+
+PyPI+1
+
+Evaluasi arsitektur lima fase
+Blueprint rinci lima fase tidak tersedia sebagai dokumen spesifikasi yang bisa saya cocokkan secara langsung. Karena itu, penilaian ini berdasarkan tanggung jawab modul yang terlihat di repository.
+Area fase	Kondisi awal	Perbaikan yang disiapkan
+Fondasi dan UI	Struktur dasar tersedia	Path aplikasi, konfigurasi, dan pembaruan UI
+Presentasi/PPTX	Parser tersedia	Parsing dipisahkan dari kegagalan thumbnail
+Thumbnail	Renderer PDF tersedia	Cache, pencarian PDF, validasi, logging
+Computer Vision	Face dan gesture tersedia	Parameter konfigurasi, smoothing, lifecycle worker
+Integrasi kontrol	Security gate tersedia	Penghentian thread, target ONLYOFFICE, pengiriman input
+
+Dengan demikian, proyek sudah mempunyai kerangka fitur utama, tetapi implementasinya belum sepenuhnya konsisten sebagai aplikasi desktop modular yang siap digunakan secara stabil.
+
+2. Root cause thumbnail tidak muncul
+Ada beberapa masalah spesifik yang diperbaiki.
+
+A. Pencarian PDF terlalu ketat
+
+Implementasi sebelumnya:
+pdf_source = source.with_suffix(".pdf")if not pdf_source.exists():    return []
+
+
+
+Di Linux, nama file bersifat case-sensitive.
+
+Contohnya:
+presentasi.pptx
+Presentasi.pdf
+
+
+atau:
+presentasi.pptx
+presentasi.PDF
+
+
+Dapat menyebabkan PDF tidak ditemukan.
+
+B. Path cache bergantung pada direktori eksekusi
+
+Implementasi awal:
+CACHE_DIR = Path("assets/thumbnails")
+
+
+
+Path tersebut bergantung pada working directory proses. Jika aplikasi dijalankan dari desktop launcher, direktori eksekusinya belum tentu direktori repository.
+
+C. Error rendering disembunyikan
+
+Implementasi awal:
+subprocess.run(    command,    check=True,    stdout=subprocess.DEVNULL,    stderr=subprocess.DEVNULL)
+
+
+
+Ketika Poppler mengalami masalah, pesan error tidak terlihat.
+
+D. Cache tidak memastikan semua halaman tersedia
+
+Kode awal mengembalikan thumbnail apabila menemukan minimal satu file:
+if existing_pngs:    return [str(p) for p in existing_pngs]
+
+
+
+Artinya, cache yang hanya berisi sebagian halaman masih dianggap valid.
+
+E. UI tidak melakukan rendering ulang saat ukuran berubah
+
+Kode lama:
+pix = QPixmap(current.image_path)self.lbl_current_thumb.setPixmap(    pix.scaled(        self.lbl_current_thumb.size(),        Qt.KeepAspectRatio,        Qt.SmoothTransformation    ))
+
+
+
+Pixmap langsung diperkecil berdasarkan ukuran widget pada saat itu. Tidak ada penyimpanan gambar sumber untuk proses resize berikutnya.
+
+Perbaikan yang disiapkan mengatasi kelima masalah tersebut.
+
+Catatan tentang ONLYOFFICE: aplikasi tidak perlu LibreOffice untuk pendekatan ini. PDF yang telah diekspor dari ONLYOFFICE dibaca langsung oleh Poppler melalui pdftoppm. Perintah tersebut memang menghasilkan file gambar terpisah untuk setiap halaman PDF.
+
+Debian Manpages+1
+
+3. File yang sudah diperbaiki
+AI Presenter Control — Complete Patch
+
+ZIP · 10 file pengganti + dokumentasi audit
+
+Tersedia
+
+Download seluruh kode yang diperbaiki (.zip)
+
+Baca laporan audit teknis
+
+Baca panduan penerapan patch
+
+Isi patch meliputi:
+File	Perubahan
+thumbnail_service.py	Renderer Poppler, pencarian PDF, cache SHA-256, validasi output, logging
+pptx_parser.py	Pemisahan parsing PPTX dan rendering thumbnail
+state_manager.py	Pengelolaan state, autentikasi, gesture gate, kontrol ONLYOFFICE
+main_window.py	Pemuatan QPixmap, penyimpanan pixmap sumber, resize otomatis
+camera_worker.py	Stop thread, cleanup, camera disconnect, konfigurasi kamera
+face_service.py	Face matching, path absolut, tolerance dan grace period
+gesture_service.py	Smoothing, history gesture, cooldown, konfigurasi dinamis
+main.py	Resolusi path berdasarkan root proyek dan pembacaan konfigurasi
+config.yaml	Penyatuan konfigurasi kamera, keamanan, gesture, dan presentasi
+requirements.txt	Dependensi aplikasi
+
+Perbaikan utama pada ThumbnailService
+Versi pengganti sekarang menjalankan alur:
+PPTX
+ │
+ ├── Validasi file
+ │
+ ▼
+Cari PDF pendamping
+ │
+ ├── Nama dasar sama
+ ├── Mendukung .pdf dan .PDF
+ │
+ ▼
+Cari executable pdftoppm
+ │
+ ▼
+Buat fingerprint PDF SHA-256
+ │
+ ▼
+Periksa cache
+ │
+ ├── Cache lengkap → gunakan kembali
+ │
+ └── Cache tidak lengkap → render ulang
+ │
+ ▼
+pdftoppm → slide-1.png, slide-2.png, ...
+ │
+ ▼
+Validasi hasil render
+ │
+ ▼
+Kembalikan absolute image paths
+
+
+Perbedaan pentingnya adalah cache sekarang tidak dianggap valid hanya karena memiliki satu gambar. Jumlah gambar dibandingkan dengan jumlah slide PPTX.
+Perbaikan utama pada MainWindow
+Sekarang gambar sumber disimpan sebelum di-scale:
+self._current_source_pixmap = QPixmap(current.image_path)self._set_thumbnail_label(    self.lbl_current_thumb,    self._current_source_pixmap,    "[Text Preview Mode]")
+
+
+
+Ketika ukuran jendela berubah, gambar dirender ulang dari sumber aslinya:
+def resizeEvent(self, event):    super().resizeEvent(event)    self._refresh_slide_thumbnails()
+
+
+
+Dengan demikian, ukuran awal QLabel tidak lagi menentukan ukuran thumbnail secara permanen.
+
+4. Pengaturan pada Arch Linux
+Setelah menyalin file patch ke repository, lakukan instalasi berikut.
+
+A. Instal Poppler dan tool window control
+sudo pacman -S poppler wmctrl xdotool
+
+
+Periksa Poppler:
+which pdftoppm
+pdftoppm -v
+
+
+B. Siapkan virtual environment
+cd Presenter-App
+
+python -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+
+face-recognition memerlukan dlib. Pada Python 3.14, perhatikan proses instalasi dlib, karena wheel yang cocok dengan platform Arch mungkin tidak tersedia dan instalasi bisa memerlukan proses kompilasi.
+
+C. Pastikan pasangan file benar
+Presenter-App/
+│
+├── presentasi.pptx
+├── presentasi.pdf
+│
+├── config.yaml
+├── main.py
+│
+└── assets/
+    ├── faces/
+    │   └── admin.jpg
+    │
+    ├── models/
+    │   └── hand_landmarker.task
+    │
+    └── thumbnails/
+
+
+D. Jalankan aplikasi
+python main.py
+
+
+Atau:
+python main.py /path/ke/presentasi.pptx
+
+
+E. Konfigurasi ONLYOFFICE
+
+Pada config.yaml patch, sudah disiapkan:
+presentation_control:
+  target_window_title: "ONLYOFFICE"
+
+
+Nama tersebut dapat disesuaikan dengan judul jendela yang muncul pada:
+wmctrl -l
+
+
+Pengaturan ini memungkinkan aplikasi mengaktifkan jendela ONLYOFFICE sebelum mengirim tombol navigasi.
+
+5. Catatan kompatibilitas Python 3.14
+Ada hal yang perlu diperhatikan sebelum menganggap seluruh stack sudah terjamin kompatibel.
+Dependensi	Hasil pemeriksaan
+PySide6	Mendukung Python 3.14
+OpenCV	Menyediakan wheel Python 3.14
+MediaPipe	Dokumentasi resmi mencakup Python 3.9–3.14
+python-pptx	Persyaratan minimum Python 3.8, tetapi classifier PyPI yang ditampilkan belum mencantumkan 3.14
+face-recognition	Risiko kompatibilitas lebih tinggi karena bergantung pada dlib
+
+Sumber: dokumentasi MediaPipe, PySide6, OpenCV, python-pptx, dan face-recognition.
+
+Saya menyarankan menguji face-recognition dan dlib secara terpisah sebelum mengandalkannya untuk autentikasi pada instalasi Python 3.14.
+6. Hasil pengujian patch
+Pemeriksaan sintaks Python
+Lulus
+
+Uji cache thumbnail
+Lulus
+
+Uji ekstensi PDF kapital
+Lulus
+
+Render PDF menggunakan Poppler
+Lulus
+
+Uji render menggunakan PDF sementara dua halaman menghasilkan slide-1.png dan slide-2.png. Uji cache berikutnya juga berhasil menggunakan hasil render sebelumnya.
+
+Belum diverifikasi end-to-end
+- Pemutaran kamera dan deteksi wajah.
+- Gesture MediaPipe pada webcam sebenarnya.
+- Tampilan QPixmap pada desktop PySide6.
+- Pengiriman keyboard ke ONLYOFFICE pada sesi Arch Linux pengguna.
+Lingkungan pengujian tidak memiliki PySide6, MediaPipe, face-recognition, dan display server. Kompilasi sintaks dilakukan menggunakan Python 3.13, bukan runtime Python 3.14 pengguna.
+
+Kesimpulan: perbaikan paling penting untuk masalah yang sedang dialami adalah memastikan ThumbnailService benar-benar menghasilkan PNG dan PPTXParser mengirimkan path absolut ke SlideInfo.image_path. Jangan langsung menyalahkan QPixmap, karena placeholder yang muncul justru menunjukkan bahwa path gambar belum tersedia pada tahap sebelumnya.
+
+Setelah menerapkan patch, jalankan aplikasi melalui terminal. Apabila thumbnail masih belum tampil, kirimkan log terminal, terutama pesan pdftoppm, path PDF yang dicari, dan jumlah halaman yang berhasil dirender. Dari sana penyebab pada mesin Arch Linux dapat ditentukan dengan lebih spesifik.
