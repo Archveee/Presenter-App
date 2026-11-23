@@ -1,0 +1,17 @@
+camera:
+  index: 0
+  width: 640
+  height: 480
+
+security:
+  known_face_path: "assets/faces/admin.jpg"
+  face_match_tolerance: 0.50
+  face_check_interval_frames: 10
+  face_loss_grace_period: 3.5
+
+gesture:
+  model_path: "assets/models/hand_landmarker.task"
+  swipe_distance_threshold: 0.16
+  min_gesture_duration: 0.08
+  max_gesture_duration: 1.20
+  gesture_cooldown: 1.0

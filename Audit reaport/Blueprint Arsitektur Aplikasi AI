@@ -1,0 +1,1923 @@
+# **Blueprint Arsitektur Aplikasi AI Presenter Control**
+
+Saya merekomendasikan membangun aplikasi ini menggunakan **Python + PySide6 + OpenCV + MediaPipe + face_recognition + python-pptx**, dengan arsitektur modular dan komunikasi antarmodul menggunakan Qt Signals/Slots.
+
+Prinsip utamanya adalah memisahkan tiga pekerjaan besar:
+
+1. **Presentation Engine:** membaca PPTX, mengelola informasi slide, menampilkan speaker notes, dan mengendalikan PowerPoint.
+2. **AI Engine:** memproses kamera, mengenali wajah presenter, mendeteksi gerakan tangan, dan menghasilkan perintah Next/Previous.
+3. **Presenter Dashboard:** menampilkan seluruh informasi dan status aplikasi tanpa menjalankan proses AI atau membaca file secara langsung.
+
+Dengan pemisahan ini, kamera yang sedang memproses gerakan tangan tidak akan membuat dashboard berhenti merespons.
+
+## **1. Keputusan teknologi**
+
+| Komponen            | Rekomendasi                     | Alasan                                                                          |
+| ------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| Desktop UI          | **PySide6**                     | Mendukung layout kompleks, sinyal antarthread, dan tampilan desktop profesional |
+| Camera              | OpenCV                          | Mengambil frame dari webcam                                                     |
+| Hand detection      | MediaPipe Hand Landmarker       | Menghasilkan landmark tangan untuk analisis gerakan                             |
+| Face authentication | face_recognition                | Pilihan awal untuk pencocokan wajah dengan data wajah terdaftar                 |
+| PPTX reader         | python-pptx                     | Membaca teks slide dan speaker notes                                            |
+| PPT controller      | PowerPoint COM / PyAutoGUI      | Mengendalikan presentasi yang sedang berjalan                                   |
+| Thumbnail           | PowerPoint COM atau LibreOffice | Merender slide menjadi gambar                                                   |
+| Concurrency         | QThread + QObject Worker        | Menjalankan proses berat di luar UI thread                                      |
+
+**Mengapa PySide6?** CustomTkinter sebenarnya dapat digunakan, tetapi PySide6 lebih cocok untuk aplikasi ini karena memiliki mekanisme worker object, `moveToThread()`, dan Signals/Slots untuk komunikasi antarthread. Qt juga menyarankan pola worker object untuk memindahkan operasi berat ke thread terpisah.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://doc.qt.io\&sz=32)
+
+Qt for Python+1
+
+
+
+Ada dua catatan teknis penting:
+
+- `python-pptx` mendukung akses ke speaker notes melalui `slide.notes_slide.notes_text_frame`. Jadi, pembacaan notes tidak harus selalu menggunakan PowerPoint COM.&#x20;
+
+  [image](https://www.google.com/s2/favicons?domain=https://python-pptx.readthedocs.io\&sz=32)
+
+  python-pptx 1.0.0 documentation
+
+- `win32com` hanya cocok untuk lingkungan Windows dengan Microsoft PowerPoint terpasang. Karena itu, pisahkan kontrol presentasi ke dalam adapter agar PyAutoGUI dapat menjadi alternatif, bukan ketergantungan utama.
+
+## **2. Arsitektur sistem tingkat tinggi**
+
+**PRESENTER DASHBOARD — PySide6**
+
+Main Thread • UI, status keamanan, slide preview, speaker notes, tombol kontrol
+
+Qt Signals / Slots • Application State
+
+**AI ENGINE**
+
+Worker Threads
+
+**Camera Worker**
+
+OpenCV • Webcam • Frame Buffer
+
+**Face Auth Worker**
+
+Face Detection • Face Matching • Lock State
+
+**Hand Gesture Worker**
+
+MediaPipe • Landmark • Swipe Detection
+
+**Gesture Controller**
+
+Security Gate • Cooldown • Debounce
+
+**PRESENTATION ENGINE**
+
+Background Worker
+
+**PPTX Repository**
+
+Slide Text • Notes • Slide Count
+
+**Thumbnail Service**
+
+Slide Preview • Image Rendering
+
+**Presentation Controller**
+
+Current Slide • Next Slide • Navigation
+
+**Control Backend**
+
+PowerPoint COM / PyAutoGUI
+
+Event dan data terstruktur dikirim kembali ke UI
+
+**SHARED APPLICATION STATE**
+
+Authentication State • Gesture State • Presentation State • Camera State
+
+### **A. Pembagian thread**
+
+Aplikasi sebaiknya memiliki pembagian pekerjaan seperti berikut.
+
+| Thread / Worker     | Tanggung jawab                                 | Boleh mengubah UI? |
+| ------------------- | ---------------------------------------------- | ------------------ |
+| Main UI Thread      | Dashboard, tombol, status, gambar preview      | Ya                 |
+| Camera Worker       | Mengambil frame dari webcam                    | Tidak              |
+| Face Auth Worker    | Memvalidasi identitas presenter                | Tidak              |
+| Hand Gesture Worker | Mendeteksi dan menganalisis gerakan tangan     | Tidak              |
+| Presentation Worker | Membaca PPTX, notes, thumbnail, navigasi slide | Tidak              |
+
+Semua hasil worker dikirimkan menggunakan signal. Hanya Main UI Thread yang boleh memperbarui widget.
+
+Contoh alur komunikasinya:
+
+\#chatgpt-mermaid-\_r_s9\_{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;fill:rgb(237, 237, 237);}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#chatgpt-mermaid-\_r_s9\_ .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_s9\_ .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_s9\_ .error-icon{fill:rgb(48, 48, 48);}#chatgpt-mermaid-\_r_s9\_ .error-text{fill:rgb(237, 237, 237);stroke:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ .edge-thickness-normal{stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .edge-thickness-thick{stroke-width:3.5px;}#chatgpt-mermaid-\_r_s9\_ .edge-pattern-solid{stroke-dasharray:0;}#chatgpt-mermaid-\_r_s9\_ .edge-thickness-invisible{stroke-width:0;fill:none;}#chatgpt-mermaid-\_r_s9\_ .edge-pattern-dashed{stroke-dasharray:3;}#chatgpt-mermaid-\_r_s9\_ .edge-pattern-dotted{stroke-dasharray:2;}#chatgpt-mermaid-\_r_s9\_ .marker{fill:rgb(175, 175, 175);stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_s9\_ .marker.cross{stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_s9\_ svg{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;}#chatgpt-mermaid-\_r_s9\_ p{margin:0;}#chatgpt-mermaid-\_r_s9\_ .label{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ .cluster-label text{fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ .cluster-label span{color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ .cluster-label span p{background-color:transparent;}#chatgpt-mermaid-\_r_s9\_ .label text,#chatgpt-mermaid-\_r_s9\_ span{fill:rgb(237, 237, 237);color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ .node rect,#chatgpt-mermaid-\_r_s9\_ .node circle,#chatgpt-mermaid-\_r_s9\_ .node ellipse,#chatgpt-mermaid-\_r_s9\_ .node polygon,#chatgpt-mermaid-\_r_s9\_ .node path{fill:rgb(9, 23, 44);stroke:rgb(31, 78, 148);stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .rough-node .label text,#chatgpt-mermaid-\_r_s9\_ .node .label text,#chatgpt-mermaid-\_r_s9\_ .image-shape .label,#chatgpt-mermaid-\_r_s9\_ .icon-shape .label{text-anchor:middle;}#chatgpt-mermaid-\_r_s9\_ .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .rough-node .label,#chatgpt-mermaid-\_r_s9\_ .node .label,#chatgpt-mermaid-\_r_s9\_ .image-shape .label,#chatgpt-mermaid-\_r_s9\_ .icon-shape .label{text-align:center;}#chatgpt-mermaid-\_r_s9\_ .node.clickable{cursor:pointer;}#chatgpt-mermaid-\_r_s9\_ .root .anchor path{fill:rgb(175, 175, 175)!important;stroke-width:0;stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_s9\_ .arrowheadPath{fill:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_s9\_ .edgePath .path{stroke:rgb(175, 175, 175);stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .flowchart-link{stroke:rgb(175, 175, 175);fill:none;}#chatgpt-mermaid-\_r_s9\_ .edgeLabel{background-color:rgb(0, 0, 0);text-align:center;}#chatgpt-mermaid-\_r_s9\_ .edgeLabel p{background-color:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_s9\_ .edgeLabel rect{opacity:0.5;background-color:rgb(0, 0, 0);fill:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_s9\_ .labelBkg{background-color:rgba(0, 0, 0, 0.5);}#chatgpt-mermaid-\_r_s9\_ .cluster rect{fill:rgb(48, 48, 48);stroke:rgba(255, 255, 255, 0.15);stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .cluster text{fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ .cluster span{color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:12px;background:rgb(48, 48, 48);border:1px solid rgba(255, 255, 255, 0.15);border-radius:2px;pointer-events:none;z-index:100;}#chatgpt-mermaid-\_r_s9\_ .flowchartTitleText{text-anchor:middle;font-size:18px;fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_s9\_ rect.text{fill:none;stroke-width:0;}#chatgpt-mermaid-\_r_s9\_ .icon-shape,#chatgpt-mermaid-\_r_s9\_ .image-shape{background-color:rgb(0, 0, 0);text-align:center;}#chatgpt-mermaid-\_r_s9\_ .icon-shape p,#chatgpt-mermaid-\_r_s9\_ .image-shape p{background-color:rgb(0, 0, 0);padding:2px;}#chatgpt-mermaid-\_r_s9\_ .icon-shape .label rect,#chatgpt-mermaid-\_r_s9\_ .image-shape .label rect{opacity:0.5;background-color:rgb(0, 0, 0);fill:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_s9\_ .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#chatgpt-mermaid-\_r_s9\_ .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#chatgpt-mermaid-\_r_s9\_ .node .neo-node{stroke:rgb(31, 78, 148);}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node rect,#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].cluster rect,#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node polygon{stroke:url(#chatgpt-mermaid-\_r_s9\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].swimlane.cluster rect{filter:none;}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node path{stroke:url(#chatgpt-mermaid-\_r_s9\_-gradient);stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node .neo-line path{stroke:rgb(31, 78, 148);filter:none;}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node circle{stroke:url(#chatgpt-mermaid-\_r_s9\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].node circle .state-start{fill:#000000;}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].icon-shape .icon{fill:url(#chatgpt-mermaid-\_r_s9\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_s9\_ [data-look="neo"].icon-shape .icon-neo path{stroke:url(#chatgpt-mermaid-\_r_s9\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_s9\_ .node text{font-size:14px;font-weight:600;letter-spacing:normal;fill:rgb(153, 206, 255);}#chatgpt-mermaid-\_r_s9\_ .edgeLabels text{font-size:13px;font-weight:600;letter-spacing:-0.08px;fill:rgb(153, 206, 255);}#chatgpt-mermaid-\_r_s9\_ .node tspan[font-weight="normal"],#chatgpt-mermaid-\_r_s9\_ .edgeLabels tspan[font-weight="normal"]{font-weight:600;}#chatgpt-mermaid-\_r_s9\_ .edgeLabel .label rect{opacity:1;rx:13px;ry:13px;fill:rgb(0, 14, 26);stroke:rgb(26, 62, 95);stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .node rect,#chatgpt-mermaid-\_r_s9\_ .node circle,#chatgpt-mermaid-\_r_s9\_ .node ellipse,#chatgpt-mermaid-\_r_s9\_ .node polygon,#chatgpt-mermaid-\_r_s9\_ .node path{fill:rgb(0, 40, 77);stroke:rgba(255, 255, 255, 0.1);stroke-width:1px;}#chatgpt-mermaid-\_r_s9\_ .node rect{rx:16px;ry:16px;}#chatgpt-mermaid-\_r_s9\_ .mermaid-decision .label-container{fill:rgb(0, 14, 26);stroke:rgb(26, 62, 95);stroke-dasharray:2,2;}#chatgpt-mermaid-\_r_s9\_ .edgePaths .flowchart-link{stroke:rgb(175, 175, 175);stroke-width:1px;stroke-linecap:round;stroke-linejoin:round;}#chatgpt-mermaid-\_r_s9\_ .marker{fill:rgb(175, 175, 175);stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_s9\_ :root{--mermaid-font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";}WebcamCamera WorkerLatest Frame BufferFace Auth WorkerHand Gesture WorkerPresenter Authorized?LOCKEDUNLOCKEDSwipe EventGesture ControllerSecurity CheckPresentation WorkerIgnore GesturePowerPoint Next / PreviousUpdate Slide StateQt SignalPresenter DashboardNoYesAllowedRejected
+
+**Penting:** Worker tidak boleh langsung memanggil `label.setText()`, memperbarui gambar dashboard, atau memanipulasi widget. Worker hanya mengirim data melalui signal. Selain itu, jangan membuat satu antrean frame yang terus menumpuk. Gunakan *latest-frame buffer* berkapasitas satu frame agar AI selalu memproses gambar terbaru, bukan gambar lama yang tertunda.
+
+Untuk MediaPipe, mode `LIVE_STREAM` menyediakan callback asinkron dan dapat melewatkan frame ketika sistem perlu mengurangi latensi. Alternatifnya, mode `VIDEO` dapat dijalankan berurutan pada worker thread. Pilihan mode sebaiknya ditentukan saat implementasi berdasarkan kebutuhan dan hasil pengujian.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://developers.google.com\&sz=32)
+
+Google for Developers+1
+
+
+
+### **B. Alur keamanan wajah dan gestur**
+
+Gunakan status keamanan sebagai *state machine*, bukan sekadar boolean yang diubah sembarangan.
+
+**LOCKED**
+
+Default
+
+Wajah belum dikenali, kamera belum siap, atau identitas tidak valid. Semua gestur ditolak.
+
+**VERIFYING**
+
+Checking
+
+Sistem sedang memastikan wajah yang terdeteksi cocok dengan wajah presenter yang terdaftar.
+
+**UNLOCKED**
+
+Authorized
+
+Identitas cocok dan stabil. Gestur dapat diproses selama persyaratan keamanan lainnya terpenuhi.
+
+**ERROR / CAMERA LOST**
+
+Fail-closed
+
+Kamera terputus atau sistem mengalami error. Kendali gestur langsung dikunci.
+
+Urutan pengaman yang saya rekomendasikan:
+
+1. Sistem mengambil frame dari kamera.
+2. Face Auth Worker memeriksa apakah wajah presenter terdaftar terdeteksi.
+3. Identitas harus cocok secara stabil dalam beberapa frame, bukan hanya satu frame.
+4. Hand Gesture Worker menganalisis gerakan tangan.
+5. Gesture Controller memeriksa kembali status `UNLOCKED` saat perintah akan dijalankan.
+6. Jika lolos, barulah perintah Next/Previous dikirim ke Presentation Worker.
+7. Jika wajah hilang selama batas waktu yang ditentukan, sistem kembali ke `LOCKED`.
+
+Ada satu hal yang perlu diperhatikan: **face recognition bukan otomatis liveness detection**. Foto wajah yang ditampilkan di depan kamera berpotensi disalahartikan sebagai orang asli. Untuk tahap awal, fitur ini sebaiknya dianggap sebagai pengunci kendali gestur agar penonton tidak mudah memicunya, bukan sistem autentikasi keamanan tingkat tinggi. Tambahkan pemeriksaan jumlah wajah, area presenter, dan mekanisme liveness bila diperlukan. Jika ada beberapa wajah dan sistem tidak dapat memastikan identitas presenter dengan baik, pilih kondisi terkunci.
+
+## **3. Struktur folder proyek**
+
+Agar Gemini tidak menghasilkan satu file Python yang berisi seluruh aplikasi, sejak awal tetapkan struktur berikut.
+
+```
+ai_presenter_control/
+│
+├── main.py
+├── requirements.txt
+├── README.md
+├── config.yaml
+│
+├── app/
+│   ├── core/
+│   │   ├── app_state.py
+│   │   ├── state_manager.py
+│   │   └── settings.py
+│   │
+│   ├── models/
+│   │   ├── slide_info.py
+│   │   ├── auth_result.py
+│   │   └── gesture_event.py
+│   │
+│   ├── ui/
+│   │   ├── main_window.py
+│   │   ├── components/
+│   │   │   ├── security_card.py
+│   │   │   ├── slide_preview.py
+│   │   │   ├── speaker_notes.py
+│   │   │   ├── camera_preview.py
+│   │   │   └── status_bar.py
+│   │   └── styles/
+│   │       └── dark_theme.qss
+│   │
+│   ├── workers/
+│   │   ├── camera_worker.py
+│   │   ├── face_auth_worker.py
+│   │   ├── hand_gesture_worker.py
+│   │   └── presentation_worker.py
+│   │
+│   ├── services/
+│   │   ├── camera_service.py
+│   │   ├── face_auth_service.py
+│   │   ├── gesture_service.py
+│   │   └── presentation/
+│   │       ├── pptx_reader.py
+│   │       ├── thumbnail_service.py
+│   │       ├── presentation_controller.py
+│   │       └── backends/
+│   │           ├── base_backend.py
+│   │           ├── powerpoint_com.py
+│   │           └── keyboard_backend.py
+│   │
+│   └── utils/
+│       ├── logger.py
+│       └── image_utils.py
+│
+├── assets/
+│   ├── icons/
+│   ├── models/
+│   │   └── hand_landmarker.task
+│   └── thumbnails/
+│
+├── data/
+│   └── face_profiles/
+│
+└── tests/
+    ├── test_pptx_reader.py
+    ├── test_gesture_service.py
+    ├── test_face_auth.py
+    └── test_state_manager.py
+```
+
+Struktur ini tidak harus diikuti secara kaku sampai setiap file memiliki kelas sendiri. Namun, batas tanggung jawabnya perlu dipertahankan.
+
+**Empat aturan arsitektur yang harus konsisten di semua fase:**
+
+1. `main_window.py` hanya mengurus tampilan dan interaksi pengguna.
+2. `services/` mengurus logika aplikasi dan integrasi library.
+3. `workers/` mengurus pekerjaan yang berjalan di thread terpisah.
+4. `core/` mengatur state aplikasi dan aturan komunikasi antarmodul.
+
+## **4. Lima fase pengembangan (development milestones)**
+
+Urutannya sengaja dibuat bertahap. Jangan langsung menggabungkan MediaPipe, face recognition, dan PowerPoint pada hari pertama. Setiap fase harus menghasilkan aplikasi yang dapat dijalankan sebelum melanjutkan fase berikutnya.
+
+1. **Fase 1 — UI Foundation & Dashboard**
+
+   Fondasi aplikasi
+
+   Membangun kerangka aplikasi PySide6, dashboard, komponen visual, sistem navigasi, dan data simulasi. Belum membutuhkan AI maupun file PPTX sungguhan.
+2. **Fase 2 — PowerPoint Integration**
+
+   Mengintegrasikan pembacaan PPTX, informasi slide, speaker notes, thumbnail, dan kontrol presentasi Next/Previous.
+3. **Fase 3 — Hand Gesture Recognition**
+
+   Mengintegrasikan webcam, MediaPipe, deteksi swipe kiri/kanan, filter gerakan, dan sistem pencegah perintah berulang.
+4. **Fase 4 — Face Authentication & Security Lock**
+
+   Mengintegrasikan pengenalan wajah, registrasi presenter, status Locked/Unlocked, dan pembatasan akses perintah gestur.
+5. **Fase 5 — Full Integration, Optimization & Packaging**
+
+   Menggabungkan seluruh modul, memperbaiki stabilitas thread, melakukan pengujian, menyelesaikan UI/UX, serta menyiapkan aplikasi desktop untuk distribusi.
+
+# **5. Prompt untuk Programmer (Gemini)**
+
+Berikut lima prompt yang bisa digunakan secara berurutan. Berikan prompt fase berikutnya setelah fase sebelumnya selesai dan kode proyeknya sudah diperbarui.
+
+## **Fase 1 — Membangun UI Dashboard**
+
+
+
+Milestone 1
+
+Tanpa AI dahulu
+
+
+
+**Target:** menghasilkan aplikasi desktop yang sudah terlihat seperti produk final, bukan sekadar jendela Python dengan beberapa tombol.
+
+```
+
+Bertindaklah sebagai Senior Python Desktop Application Developer dan UI/UX Designer.
+
+Saya sedang membangun aplikasi bernama "AI Presenter Control", yaitu aplikasi desktop berbasis Python untuk mengendalikan presentasi PowerPoint menggunakan gesture tangan dan face authentication.
+
+Pada fase pertama ini, fokus HANYA pada pembangunan fondasi proyek dan Presenter Dashboard UI menggunakan PySide6.
+
+JANGAN mengimplementasikan MediaPipe, OpenCV, face_recognition, atau integrasi PowerPoint dahulu. Gunakan data simulasi (mock data) agar dashboard sudah dapat dijalankan dan diuji.
+
+==================================================
+1. TECH STACK
+==================================================
+
+- Python 3.11 atau versi kompatibel dengan dependency.
+- PySide6 sebagai framework desktop GUI.
+- Qt Widgets untuk komponen antarmuka.
+- QSS untuk styling.
+- Logging menggunakan modul logging Python.
+
+Jangan menggunakan CustomTkinter.
+Jangan menggunakan Tkinter.
+Jangan membuat antarmuka berbasis web.
+
+==================================================
+2. DESAIN VISUAL DAN UI/UX
+==================================================
+
+Buat dashboard dengan tampilan modern, elegan, minimalis, dan profesional.
+
+Inspirasi desain:
+- Modern AI dashboard.
+- Dark command center.
+- Presenter control interface.
+- Premium desktop productivity application.
+
+Tema utama:
+- Background: dark navy / charcoal.
+- Card: sedikit lebih terang daripada background.
+- Accent: cyan atau teal.
+- Status aman: hijau.
+- Status peringatan: amber.
+- Status terkunci/error: merah.
+
+Gunakan:
+- Border radius konsisten.
+- Spacing yang cukup.
+- Typography modern dan mudah dibaca.
+- Icon vector atau SVG yang konsisten.
+- Shadow tipis, jangan berlebihan.
+- Hover effect pada button.
+- Transisi visual secukupnya.
+
+Jangan membuat UI terlihat seperti aplikasi administrasi biasa.
+
+Gunakan QVBoxLayout, QHBoxLayout, QGridLayout, dan QSplitter.
+DILARANG mengandalkan absolute positioning atau setGeometry untuk tata letak utama.
+
+Dashboard harus tetap rapi saat jendela diperbesar, diperkecil, atau diubah ukuran.
+
+==================================================
+3. STRUKTUR DASHBOARD
+==================================================
+
+Buat komponen berikut:
+
+A. TOP HEADER
+- Nama aplikasi AI PRESENTER CONTROL.
+- Logo atau icon aplikasi.
+- Nama file presentasi.
+- Indikator aplikasi aktif.
+- Tombol Settings.
+- Tombol minimize, maximize, dan close jika menggunakan custom title bar.
+
+B. SECURITY STATUS CARD
+Tampilkan:
+- Icon wajah.
+- Label FACE AUTHENTICATION.
+- Status LOCKED / UNLOCKED.
+- Deskripsi singkat status.
+- Indikator warna.
+- Status awal harus LOCKED.
+
+C. CURRENT SLIDE CARD
+Tampilkan:
+- Label CURRENT SLIDE.
+- Nomor slide.
+- Preview gambar dummy atau placeholder.
+- Judul slide.
+- Informasi jumlah slide.
+
+D. NEXT SLIDE CARD
+Tampilkan:
+- Label NEXT SLIDE.
+- Nomor slide berikutnya.
+- Preview gambar dummy.
+- Judul slide selanjutnya.
+
+E. SPEAKER NOTES PANEL
+Ini merupakan bagian penting dashboard.
+
+Tampilkan:
+- Heading SPEAKER NOTES.
+- Kata kunci dengan font besar dan jelas.
+- Spacing antarkata atau antarbullet.
+- Maksimal beberapa poin ditampilkan sekaligus.
+- Pastikan mudah dibaca presenter dari jarak tertentu.
+
+Contoh data:
+- Introduction
+- Main Objective
+- Research Method
+- Key Findings
+- Conclusion
+
+Jangan menggunakan font kecil untuk speaker notes.
+
+F. CAMERA PREVIEW PANEL
+Untuk fase ini cukup buat placeholder kamera.
+
+Tampilkan:
+- CAMERA PREVIEW.
+- Status CAMERA NOT CONNECTED.
+- Icon kamera.
+- Keterangan "Camera will be initialized in a later development phase".
+
+G. CONTROL PANEL
+Buat tombol:
+- Previous Slide.
+- Next Slide.
+- Start Gesture Control.
+- Stop Gesture Control.
+- Lock / Unlock (simulasi).
+- Open Presentation.
+
+Tombol boleh menggunakan mock action.
+
+H. STATUS BAR
+Tampilkan:
+- Camera Status.
+- AI Engine Status.
+- Presentation Status.
+- Application Status.
+
+==================================================
+4. SOFTWARE ARCHITECTURE
+==================================================
+
+Gunakan struktur proyek berikut:
+
+ai_presenter_control/
+    main.py
+    requirements.txt
+
+    app/
+        core/
+            app_state.py
+            state_manager.py
+
+        models/
+            slide_info.py
+
+        ui/
+            main_window.py
+            components/
+                security_card.py
+                slide_preview.py
+                speaker_notes.py
+                camera_preview.py
+                status_bar.py
+
+            styles/
+                dark_theme.qss
+
+        utils/
+            logger.py
+
+    assets/
+        icons/
+
+    tests/
+
+Buat setiap komponen UI dalam kelas terpisah jika memang memiliki tanggung jawab mandiri.
+
+Gunakan nama class PascalCase.
+Gunakan nama variabel dan fungsi snake_case.
+Gunakan type hints.
+Tambahkan docstring pada kelas dan fungsi penting.
+
+Hindari variabel seperti x, y, temp, data1, atau nama yang tidak menjelaskan maksudnya.
+
+==================================================
+5. STATE MANAGEMENT
+==================================================
+
+Buat AppState atau StateManager untuk menyimpan:
+
+- authentication_status
+- camera_status
+- gesture_enabled
+- presentation_loaded
+- current_slide_index
+- total_slides
+- current_slide_title
+- next_slide_title
+- speaker_notes
+
+Gunakan status yang jelas, jangan menyebarkan perubahan state secara langsung ke berbagai widget.
+
+Buat mock data untuk mengisi dashboard.
+
+Tombol simulasi harus memperbarui data melalui StateManager sehingga struktur ini dapat dikembangkan menjadi sistem event-driven.
+
+==================================================
+6. STANDAR KODE
+==================================================
+
+- Jangan menumpuk seluruh aplikasi di main.py.
+- Pisahkan UI, model, state, dan utility.
+- Hindari circular imports.
+- Gunakan try/except untuk penanganan error yang relevan.
+- Buat logger.
+- Gunakan pathlib untuk pengelolaan path.
+- Jangan hardcode path absolut.
+- Pastikan aplikasi dapat dijalankan dari root folder melalui python main.py.
+
+==================================================
+7. ACCEPTANCE CRITERIA
+==================================================
+
+Fase ini dianggap selesai jika:
+
+1. Aplikasi dapat dijalankan tanpa error.
+2. Dashboard tampil dengan desain profesional.
+3. Seluruh komponen dashboard tersedia.
+4. Speaker Notes memiliki ukuran tulisan yang besar.
+5. Security Card menampilkan LOCKED secara default.
+6. Tombol simulasi dapat memperbarui status.
+7. Jendela responsif terhadap perubahan ukuran.
+8. Struktur folder sudah siap menerima integrasi PPTX dan AI.
+
+==================================================
+8. OUTPUT YANG SAYA INGINKAN
+==================================================
+
+Sebelum coding, jelaskan singkat arsitektur yang akan dibuat.
+
+Kemudian:
+1. Buat seluruh file yang diperlukan.
+2. Tampilkan isi lengkap setiap file baru atau file yang diubah.
+3. Jelaskan fungsi masing-masing file.
+4. Sertakan requirements.txt.
+5. Berikan perintah instalasi dependency.
+6. Berikan perintah menjalankan aplikasi.
+7. Lakukan pemeriksaan konsistensi import dan kemungkinan error.
+
+Jangan melompat ke fase AI.
+Pertahankan struktur proyek agar dapat dilanjutkan ke Fase 2.
+
+```
+
+**Hasil yang diharapkan:** dashboard sudah terlihat seperti aplikasi final walaupun belum membaca PowerPoint dan belum menggunakan kamera.
+
+## **Fase 2 — Integrasi PowerPoint dan Speaker Notes**
+
+
+
+Milestone 2
+
+PPTX Integration
+
+
+
+**Target:** dashboard sudah dapat membuka file PPTX dan menampilkan informasi slide sebenarnya.
+
+```
+
+Bertindaklah sebagai Senior Python Developer yang berpengalaman dalam integrasi Microsoft PowerPoint, python-pptx, dan desktop application menggunakan PySide6.
+
+Saya sudah memiliki proyek AI Presenter Control dari Fase 1.
+
+TUGAS:
+Lanjutkan proyek yang sudah ada dengan mengintegrasikan PowerPoint.
+
+PENTING:
+- Jangan membangun ulang aplikasi dari nol.
+- Jangan menghapus desain UI yang sudah dibuat pada Fase 1.
+- Pertahankan struktur folder dan konsistensi penamaan.
+- Fokus pada integrasi PPTX, slide metadata, speaker notes, thumbnail, dan navigasi presentasi.
+
+==================================================
+1. LIBRARY
+==================================================
+
+Gunakan:
+- python-pptx untuk membaca isi file PPTX.
+- PySide6 untuk GUI.
+- pathlib untuk file path.
+- QThread / QObject worker untuk pekerjaan yang dapat memblokir UI.
+
+Untuk Windows, siapkan integrasi PowerPoint COM menggunakan pywin32 sebagai backend kontrol presentasi apabila Microsoft PowerPoint tersedia.
+
+PyAutoGUI hanya boleh dijadikan alternatif backend keyboard.
+
+==================================================
+2. PPTX READER
+==================================================
+
+Buat modul:
+
+app/services/presentation/pptx_reader.py
+
+Tanggung jawabnya:
+
+A. Membuka file .pptx.
+
+B. Mengambil informasi:
+- Slide count.
+- Slide index.
+- Slide title.
+- Slide text.
+- Speaker notes.
+- Informasi slide selanjutnya.
+
+C. Membuat model SlideInfo yang terstruktur.
+
+D. Mendukung file yang:
+- Tidak memiliki speaker notes.
+- Memiliki slide kosong.
+- Tidak mempunyai title placeholder.
+- Memiliki berbagai text shape.
+- Memiliki format notes dengan beberapa paragraf.
+
+Jangan menganggap setiap slide selalu memiliki title placeholder.
+
+Gunakan judul slide jika tersedia.
+Jika tidak tersedia, gunakan teks pertama yang relevan.
+Jika tidak ada teks, tampilkan "Untitled Slide".
+
+==================================================
+3. SPEAKER NOTES EXTRACTION
+==================================================
+
+Ambil speaker notes menggunakan API notes slide dari python-pptx.
+
+Perhatikan bahwa tidak semua slide memiliki notes slide.
+
+Periksa keberadaan notes sebelum membaca isi notes-nya.
+
+Bersihkan:
+- Spasi yang berlebihan.
+- Baris kosong berulang.
+- Karakter yang tidak relevan.
+- Placeholder atau teks administratif yang bukan bagian notes.
+
+Jangan menghapus isi speaker notes yang ditulis oleh presenter.
+
+Kirim notes dalam format yang dapat diproses oleh UI:
+- Raw notes.
+- Daftar paragraf.
+- Daftar bullet jika dapat diidentifikasi.
+
+Speaker Notes UI harus menampilkan kata kunci atau kalimat penting dengan jelas.
+
+Jika tidak ada notes, tampilkan:
+"No speaker notes available for this slide."
+
+==================================================
+4. THUMBNAIL SERVICE
+==================================================
+
+Buat:
+app/services/presentation/thumbnail_service.py
+
+Tugas:
+Menghasilkan thumbnail untuk slide PPTX.
+
+Catatan:
+python-pptx digunakan untuk membaca struktur dan teks, bukan sebagai renderer visual lengkap.
+
+Buat interface ThumbnailProvider agar sumber renderer dapat diganti.
+
+Prioritaskan:
+- PowerPoint COM untuk Windows jika tersedia.
+- LibreOffice headless sebagai alternatif jika tersedia.
+
+Jika tidak ada renderer:
+- Jangan membuat aplikasi crash.
+- Gunakan preview berbasis teks.
+- Tampilkan placeholder yang elegan.
+
+Simpan thumbnail pada folder cache aplikasi.
+Gunakan nama file yang konsisten dan hindari membuat thumbnail berulang kali untuk file yang sama jika sudah tersedia.
+
+Proses rendering harus berjalan di background worker.
+
+==================================================
+5. PRESENTATION CONTROL BACKEND
+==================================================
+
+Buat sistem adapter:
+
+base_backend.py
+powerpoint_com.py
+keyboard_backend.py
+
+Definisikan interface untuk:
+- open_presentation()
+- start_slideshow()
+- next_slide()
+- previous_slide()
+- get_current_slide()
+- close_presentation()
+
+PowerPoint COM menjadi backend utama jika berjalan di Windows dan PowerPoint terpasang.
+
+PENTING:
+Jika menggunakan COM:
+- Inisialisasi COM pada thread khusus.
+- Gunakan objek COM pada thread yang sama.
+- Tangani COM exception.
+- Lakukan cleanup dan CoUninitialize saat worker berhenti.
+
+PyAutoGUI sebagai fallback:
+- Pastikan jendela PowerPoint benar-benar menjadi target.
+- Jangan mengirim tombol secara sembarangan ke aplikasi lain.
+- Jangan menganggap posisi slide selalu akurat jika pengguna dapat menavigasi secara manual.
+
+Jika posisi slide tidak bisa diverifikasi, tandai sebagai estimasi dan jangan menampilkan informasi yang seolah-olah pasti.
+
+==================================================
+6. PRESENTATION WORKER
+==================================================
+
+Buat:
+app/workers/presentation_worker.py
+
+Worker harus bertanggung jawab untuk:
+- Membaca file PPTX.
+- Mengambil metadata slide.
+- Memuat speaker notes.
+- Menghasilkan thumbnail.
+- Menjalankan perintah Next/Previous.
+- Mengirim perubahan current slide.
+- Mengirim informasi slide selanjutnya.
+
+Gunakan QObject worker yang dipindahkan ke QThread.
+
+Buat signal, minimal:
+- presentation_loaded
+- slide_changed
+- notes_updated
+- thumbnail_ready
+- error_occurred
+- operation_finished
+
+Jangan memproses PPTX atau melakukan COM automation pada Main UI Thread.
+
+==================================================
+7. DASHBOARD INTEGRATION
+==================================================
+
+Hubungkan hasil Presentation Worker dengan komponen Fase 1.
+
+Perilaku:
+
+Saat file PPTX dipilih:
+- Current Slide menampilkan slide pertama.
+- Next Slide menampilkan slide kedua jika tersedia.
+- Speaker Notes menampilkan notes slide pertama.
+- Total slide diperbarui.
+- Nama file presentasi diperbarui.
+
+Saat perintah Next:
+- Current Slide berubah.
+- Next Slide berubah.
+- Thumbnail berubah.
+- Speaker Notes berubah.
+
+Saat perintah Previous:
+- Semua data kembali mengikuti posisi slide aktual.
+
+Pada slide terakhir:
+- Next Slide tampil sebagai "End of Presentation".
+- Jangan mengakses index di luar batas.
+
+Pada slide pertama:
+- Previous Slide tidak boleh membuat posisi menjadi negatif.
+
+==================================================
+8. THREADING DAN ERROR HANDLING
+==================================================
+
+Semua operasi file besar, rendering, dan komunikasi COM harus keluar dari UI Thread.
+
+Gunakan Qt Signals/Slots untuk mengirim hasil.
+
+Jangan pernah mengubah widget dari thread lain.
+
+Pastikan:
+- Thread dapat dihentikan secara graceful.
+- File tidak ditemukan ditangani.
+- File rusak ditangani.
+- PowerPoint tidak tersedia ditangani.
+- Tidak ada thumbnail yang gagal dimuat sehingga membuat UI crash.
+
+==================================================
+9. ACCEPTANCE CRITERIA
+==================================================
+
+1. Pengguna dapat memilih file PPTX.
+2. Slide count tampil dengan benar.
+3. Judul dan teks slide terbaca.
+4. Speaker notes terbaca.
+5. Current Slide dan Next Slide selalu diperbarui.
+6. Thumbnail ditampilkan apabila renderer tersedia.
+7. Navigasi Next dan Previous berfungsi.
+8. File tanpa notes tidak menyebabkan error.
+9. UI tidak freeze selama pembacaan PPTX atau rendering.
+10. Semua komponen UI Fase 1 tetap dipertahankan.
+
+==================================================
+10. OUTPUT
+==================================================
+
+Lakukan audit kode yang sudah ada sebelum mengubah file.
+
+Berikan:
+- Arsitektur integrasi PowerPoint.
+- Daftar file baru dan yang diubah.
+- Isi lengkap file yang dibuat atau diperbarui.
+- Requirements dependency baru.
+- Instruksi instalasi PowerPoint COM atau LibreOffice sesuai pilihan backend.
+- Cara menguji dengan file PPTX.
+- Daftar keterbatasan yang masih ada.
+
+Jangan mengimplementasikan MediaPipe atau face authentication pada fase ini.
+Persiapkan interface untuk Fase 3.
+
+```
+
+**Catatan arsitektur:** fase ini penting karena dashboard nantinya harus menampilkan slide yang benar-benar sedang aktif. Jangan hanya menggunakan penghitung slide lokal jika backend PowerPoint dapat memberikan posisi aktual.
+
+## **Fase 3 — Integrasi MediaPipe dan Gesture Control**
+
+
+
+Milestone 3
+
+Hand Gesture AI
+
+
+
+**Target:** pengguna dapat melakukan swipe kiri atau kanan untuk mengirim perintah pergantian slide.
+
+```
+
+Bertindaklah sebagai Senior Computer Vision Engineer dan Python AI Application Developer.
+
+Saya memiliki proyek AI Presenter Control yang sudah memiliki:
+- PySide6 Dashboard.
+- PPTX Reader.
+- Speaker Notes Integration.
+- Presentation Controller.
+- Next / Previous Slide Backend.
+
+Sekarang implementasikan FASE 3: HAND GESTURE RECOGNITION.
+
+Jangan merombak proyek dari awal.
+Pertahankan arsitektur dan UI yang sudah tersedia.
+
+Pada fase ini, Face Authentication belum diimplementasikan.
+Buat security interface sementara agar sistem gestur dapat diuji dengan status authorization simulasi.
+
+==================================================
+1. TECH STACK
+==================================================
+
+Gunakan:
+- OpenCV untuk membaca webcam.
+- MediaPipe Hand Landmarker untuk mendeteksi landmark tangan.
+- PySide6 untuk dashboard.
+- QThread + QObject Worker untuk background processing.
+- NumPy untuk pengolahan koordinat jika diperlukan.
+
+Pilih satu implementasi MediaPipe yang konsisten.
+Jangan mencampur beberapa API MediaPipe yang berbeda tanpa alasan.
+
+Pastikan model hand_landmarker.task tersedia pada path konfigurasi.
+
+==================================================
+2. CAMERA SERVICE
+==================================================
+
+Buat:
+app/services/camera_service.py
+
+Tanggung jawab:
+- Membuka webcam.
+- Mengambil frame.
+- Menyediakan informasi resolusi dan FPS.
+- Menghentikan capture.
+- Melepaskan resource kamera.
+
+Jangan membuka VideoCapture dari banyak worker.
+
+Satu Camera Worker menjadi pemilik utama objek cv2.VideoCapture.
+
+Buat:
+app/workers/camera_worker.py
+
+Gunakan loop yang dapat dihentikan melalui stop flag atau mekanisme shutdown aman.
+
+Jika kamera gagal:
+- Kirim error signal.
+- Perbarui camera status.
+- Jangan membuat aplikasi crash.
+
+Gunakan latest-frame buffer dengan kapasitas satu frame.
+
+Jangan menumpuk frame lama dalam antrean tanpa batas.
+
+Pastikan frame yang diberikan ke worker AI tidak mengalami modifikasi bersamaan yang menyebabkan race condition. Gunakan salinan frame bila diperlukan.
+
+==================================================
+3. HAND GESTURE SERVICE
+==================================================
+
+Buat:
+app/services/gesture_service.py
+
+Gunakan MediaPipe untuk mendapatkan landmark tangan.
+
+Gesture utama:
+- Swipe LEFT = NEXT SLIDE.
+- Swipe RIGHT = PREVIOUS SLIDE.
+
+Gunakan koordinat landmark tangan yang relevan, terutama area wrist dan palm.
+
+Jangan menentukan swipe hanya dari posisi satu frame.
+
+Analisis perubahan posisi berdasarkan beberapa frame dan timestamp.
+
+Buat pengaturan:
+- SWIPE_DISTANCE_THRESHOLD
+- SWIPE_VELOCITY_THRESHOLD
+- MIN_GESTURE_DURATION
+- GESTURE_COOLDOWN
+- HAND_CONFIDENCE_THRESHOLD
+
+Gunakan nilai konfigurasi awal yang masuk akal dan dapat diubah setelah pengujian.
+
+Perhatikan bahwa kamera preview dapat dibuat mirrored.
+Pastikan arah swipe yang diproses sama dengan arah visual yang dilihat pengguna.
+
+==================================================
+4. GESTURE FILTERING
+==================================================
+
+Implementasikan:
+- Temporal smoothing.
+- Minimum movement threshold.
+- Velocity calculation.
+- Debounce.
+- Cooldown.
+- Neutral-position rearming.
+
+Satu gerakan swipe hanya boleh menghasilkan satu Gesture Event.
+
+Jangan sampai ketika tangan ditahan pada satu posisi, aplikasi mengirim Next Slide secara terus-menerus.
+
+Jangan mendeteksi gerakan kecil sebagai swipe.
+
+Buat GestureEvent dengan data:
+- gesture_type
+- direction
+- confidence atau quality score jika tersedia
+- timestamp
+
+Pastikan setiap event hanya diterbitkan ketika gesture memenuhi seluruh kriteria.
+
+==================================================
+5. HAND GESTURE WORKER
+==================================================
+
+Buat:
+app/workers/hand_gesture_worker.py
+
+Worker:
+- Membaca frame terbaru dari frame buffer.
+- Melakukan inferensi MediaPipe.
+- Menghitung perubahan landmark.
+- Mendeteksi swipe.
+- Mengirim hasil melalui Qt Signals.
+
+Signal minimal:
+- hand_detected
+- gesture_detected
+- gesture_status_changed
+- processing_error
+
+Jangan mengakses widget dashboard dari worker.
+
+Hindari pemrosesan seluruh frame jika FPS terlalu tinggi.
+Buat konfigurasi processing interval atau frame sampling.
+
+==================================================
+6. SECURITY GATE SEMENTARA
+==================================================
+
+Buat interface authorization pada Gesture Controller.
+
+Pada fase ini:
+- Sediakan mock authentication state.
+- Izinkan pengujian gesture hanya ketika mock state bernilai UNLOCKED.
+- Jika LOCKED, gesture tidak boleh diteruskan ke Presentation Controller.
+
+Jangan menanam logika authentication langsung pada MediaPipe Service.
+
+Alur wajib:
+
+Hand Gesture Worker
+    -> Gesture Event
+    -> Gesture Controller
+    -> Authorization Check
+    -> Cooldown Check
+    -> Presentation Controller
+    -> Next / Previous Slide
+
+Security gate harus diperiksa tepat sebelum perintah dijalankan, bukan hanya saat gesture dideteksi.
+
+==================================================
+7. CAMERA PREVIEW UI
+==================================================
+
+Integrasikan hasil kamera ke dashboard.
+
+Tampilkan:
+- Live camera preview.
+- Hand landmark overlay jika tersedia.
+- Camera status.
+- Hand detection status.
+- Gesture status.
+- Gesture terakhir yang dikenali.
+
+Gunakan frame preview yang telah dikonversi menjadi format yang dapat ditampilkan PySide6.
+
+Pengiriman frame ke UI harus melalui signal.
+
+Jaga agar UI tidak menerima frame jauh lebih cepat daripada kemampuan refresh-nya.
+
+==================================================
+8. PRESENTATION INTEGRATION
+==================================================
+
+Jika:
+gesture = SWIPE LEFT
+dan authorization = UNLOCKED
+
+Maka jalankan:
+Presentation Controller -> NEXT SLIDE.
+
+Jika:
+gesture = SWIPE RIGHT
+dan authorization = UNLOCKED
+
+Maka jalankan:
+Presentation Controller -> PREVIOUS SLIDE.
+
+Jangan memanggil PyAutoGUI langsung dari MediaPipe Service.
+
+Jangan membuat worker gesture mengetahui detail implementasi PowerPoint.
+
+==================================================
+9. PERFORMANCE DAN RESOURCE MANAGEMENT
+==================================================
+
+Pastikan:
+- Kamera hanya dibuka satu kali.
+- Hand detection tidak dijalankan pada UI Thread.
+- Latest-frame buffer digunakan.
+- Tidak ada antrean frame yang bertambah tanpa batas.
+- Thread dapat berhenti dengan graceful.
+- Kamera dilepaskan saat aplikasi ditutup.
+- Tidak ada infinite blocking saat camera read gagal.
+
+==================================================
+10. TESTING
+==================================================
+
+Buat pengujian:
+- Swipe kiri.
+- Swipe kanan.
+- Gerakan tangan kecil.
+- Tangan diam.
+- Swipe terlalu cepat.
+- Swipe terlalu lambat.
+- Gesture berulang.
+- Gesture saat LOCKED.
+- Gesture saat UNLOCKED.
+- Webcam tidak tersedia.
+
+Pastikan cooldown mencegah double navigation.
+
+==================================================
+11. ACCEPTANCE CRITERIA
+==================================================
+
+1. Webcam dapat dibuka dari dashboard.
+2. Live preview tampil.
+3. MediaPipe dapat mendeteksi tangan.
+4. Swipe kiri menghasilkan Next.
+5. Swipe kanan menghasilkan Previous.
+6. Satu swipe hanya menghasilkan satu perintah.
+7. Gestur ditolak saat mock state LOCKED.
+8. UI tidak freeze selama inferensi.
+9. Kamera dilepaskan saat aplikasi ditutup.
+10. Kode siap menerima Face Authentication pada Fase 4.
+
+==================================================
+12. OUTPUT
+==================================================
+
+Sebelum implementasi, audit modul kamera, state manager, dan presentation controller yang ada.
+
+Berikan:
+- Daftar file yang ditambah dan diubah.
+- Kode lengkap.
+- Dependency baru.
+- Cara mendapatkan dan menyimpan model MediaPipe.
+- Instruksi pengujian gesture.
+- Penjelasan algoritma swipe.
+- Penjelasan mekanisme cooldown dan anti-double-trigger.
+- Hal yang perlu dikalibrasi berdasarkan kondisi webcam.
+
+Jangan implementasikan face_recognition dahulu.
+
+```
+
+**Saran implementasi:** jangan mengoptimalkan FPS secara berlebihan di awal. Prioritaskan akurasi arah swipe, kestabilan deteksi, dan pencegahan double-trigger. Sistem yang salah menavigasikan slide jauh lebih mengganggu daripada sistem dengan FPS sedikit lebih rendah.
+
+## **Fase 4 — Face Authentication dan Security Lock**
+
+
+
+Milestone 4
+
+Security Integration
+
+
+
+**Target:** sistem hanya menjalankan kontrol gestur ketika wajah presenter yang terdaftar berhasil diverifikasi.
+
+```
+
+Bertindaklah sebagai Senior Computer Vision Engineer, AI Security Developer, dan Python Software Architect.
+
+Proyek AI Presenter Control sudah memiliki:
+- PySide6 dashboard.
+- Presentation Engine.
+- PPTX Reader.
+- Speaker Notes.
+- Thumbnail Service.
+- Camera Worker.
+- Hand Gesture Worker.
+- Gesture Controller.
+- Gesture cooldown dan swipe filtering.
+
+Implementasikan FASE 4: FACE AUTHENTICATION DAN SECURITY LOCK.
+
+Jangan menulis ulang fitur dari fase sebelumnya.
+Integrasikan modul autentikasi wajah dengan arsitektur yang sudah ada.
+
+==================================================
+1. TECH STACK
+==================================================
+
+Gunakan:
+- face_recognition untuk face encoding dan face matching.
+- OpenCV untuk pengolahan gambar.
+- NumPy.
+- PySide6 Signals / Slots.
+- QThread dan QObject Worker.
+
+Buat abstraksi FaceAuthenticator sehingga implementasi backend bisa diganti ke DeepFace di masa mendatang tanpa mengubah seluruh aplikasi.
+
+Untuk MVP, gunakan face_recognition.
+
+==================================================
+2. FACE AUTHENTICATION SERVICE
+==================================================
+
+Buat:
+app/services/face_auth_service.py
+
+Fungsi utama:
+- Mendaftarkan wajah presenter.
+- Menghasilkan face encoding.
+- Membandingkan wajah kamera dengan encoding terdaftar.
+- Mengidentifikasi wajah yang cocok.
+- Mengembalikan hasil autentikasi.
+
+Jangan hanya mendeteksi keberadaan wajah.
+
+Sistem harus membedakan:
+- Face detected.
+- Known presenter recognized.
+- Unknown person.
+- No face detected.
+- Multiple faces detected.
+- Authentication error.
+
+Jika tidak ada wajah yang cocok, status harus tetap LOCKED.
+
+==================================================
+3. FACE ENROLLMENT
+==================================================
+
+Buat alur registrasi presenter.
+
+Fitur:
+- Mengambil beberapa sampel wajah dari webcam.
+- Memastikan wajah cukup jelas.
+- Mengumpulkan encoding yang valid.
+- Memastikan hanya identitas presenter yang didaftarkan.
+- Menyimpan profil secara lokal.
+
+Simpan data encoding, bukan rekaman webcam mentah, sebagai pilihan default.
+
+Tambahkan:
+- Nama profil presenter.
+- Profil aktif.
+- Opsi menghapus profil.
+- Validasi sebelum menyimpan.
+
+Jangan mengunggah wajah atau encoding ke server eksternal.
+
+Berikan pengguna informasi bahwa encoding wajah merupakan data biometrik dan memerlukan persetujuan pengguna.
+
+Jika library tidak mampu mencegah foto atau video digunakan untuk spoofing, nyatakan keterbatasan tersebut dengan jelas. Jangan mengklaim sistem sudah memiliki liveness detection apabila belum diimplementasikan.
+
+==================================================
+4. FACE AUTH WORKER
+==================================================
+
+Buat:
+app/workers/face_auth_worker.py
+
+Worker harus:
+- Membaca frame terbaru dari frame buffer.
+- Melakukan face detection.
+- Menghasilkan face encoding.
+- Membandingkan dengan profil yang terdaftar.
+- Memperbarui authentication state.
+- Mengirim status melalui Qt Signal.
+
+Face recognition tidak perlu dijalankan pada setiap frame kamera.
+
+Buat frame sampling interval yang dapat dikonfigurasi agar beban CPU lebih terkendali.
+
+Pastikan worker tidak membuka webcam kedua.
+
+Gunakan hasil dari Camera Worker yang sama dengan Hand Gesture Worker.
+
+==================================================
+5. SECURITY STATE MACHINE
+==================================================
+
+Gunakan state:
+
+LOCKED
+VERIFYING
+UNLOCKED
+CAMERA_LOST
+AUTHENTICATION_ERROR
+
+Aturan:
+
+A. LOCKED
+- Default ketika aplikasi dijalankan.
+- Semua gesture ditolak.
+
+B. VERIFYING
+- Wajah terdeteksi dan sedang diverifikasi.
+- Belum boleh mengirim perintah slide.
+
+C. UNLOCKED
+- Wajah presenter cocok dan lolos stabilitas verifikasi.
+- Gesture boleh dijalankan selama syarat lainnya terpenuhi.
+
+D. CAMERA_LOST
+- Kamera terputus.
+- Gesture langsung diblokir.
+
+E. AUTHENTICATION_ERROR
+- Face recognition mengalami error.
+- Gesture diblokir.
+
+Sistem harus fail-closed.
+
+Jangan pernah menganggap error sebagai autentikasi berhasil.
+
+==================================================
+6. AUTHENTICATION STABILITY
+==================================================
+
+Jangan membuka kunci hanya karena satu frame cocok.
+
+Gunakan:
+- Minimum consecutive successful matches.
+- Configurable verification interval.
+- Grace period ketika wajah sementara tidak terdeteksi.
+- Maximum time tanpa authorized presenter.
+- Relock threshold.
+
+Jika wajah presenter menghilang melewati grace period:
+- Ubah state menjadi LOCKED.
+- Hentikan penerimaan gesture baru.
+- Tampilkan status pada dashboard.
+
+Jika hasil pengenalan tidak konsisten:
+- Kembali ke VERIFYING atau LOCKED sesuai konfigurasi.
+
+Jika kamera berhenti:
+- Langsung LOCKED tanpa grace period.
+
+Jika beberapa wajah terdeteksi dan sistem tidak dapat memverifikasi identitas serta konteks presenter secara aman:
+- Tolak gesture.
+- Tampilkan status multiple faces.
+- Tetap LOCKED.
+
+==================================================
+7. INTEGRASI AUTHENTICATION DAN GESTURE
+==================================================
+
+Ini bagian paling penting.
+
+Face Auth Worker tidak boleh langsung menjalankan perintah Next atau Previous.
+
+Gunakan alur:
+
+Camera Worker
+    -> Frame Buffer
+        -> Face Auth Worker
+        -> Hand Gesture Worker
+
+Face Auth Worker
+    -> Authentication Result
+    -> State Manager
+
+Hand Gesture Worker
+    -> Gesture Event
+    -> Gesture Controller
+
+Gesture Controller:
+    1. Memeriksa status authentication.
+    2. Memeriksa status kamera.
+    3. Memeriksa status gesture.
+    4. Memeriksa cooldown.
+    5. Baru menjalankan perintah presentasi.
+
+Periksa authorization kembali tepat sebelum navigasi dilakukan untuk menghindari race condition ketika wajah menghilang.
+
+Jangan hanya mengandalkan status LOCKED/UNLOCKED yang disimpan oleh UI.
+
+Pertimbangkan mekanisme presenter zone atau keterkaitan posisi tangan dengan area presenter agar tangan penonton tidak mudah memicu perintah ketika wajah presenter masih terlihat.
+
+==================================================
+8. DASHBOARD UI UPDATE
+==================================================
+
+Integrasikan dengan Security Status Card.
+
+Saat LOCKED:
+- Icon wajah terkunci.
+- Warna merah.
+- Teks LOCKED.
+- Deskripsi "Presenter not authenticated".
+- Gesture Control disabled secara logis.
+
+Saat VERIFYING:
+- Icon proses verifikasi.
+- Warna amber.
+- Teks VERIFYING.
+- Deskripsi "Checking presenter identity".
+
+Saat UNLOCKED:
+- Icon wajah terverifikasi.
+- Warna hijau.
+- Teks UNLOCKED.
+- Deskripsi "Authorized presenter detected".
+
+Saat CAMERA_LOST:
+- Tampilkan peringatan kamera.
+- Gesture Control langsung dinonaktifkan.
+
+Tambahkan informasi:
+- Presenter profile.
+- Face detection status.
+- Last verification status.
+
+Jangan menampilkan confidence sebagai persentase yang seolah-olah merupakan probabilitas terkalibrasi apabila nilai tersebut tidak benar-benar terkalibrasi.
+
+==================================================
+9. PRIVACY DAN ERROR HANDLING
+==================================================
+
+- Jangan menyimpan frame kamera secara permanen.
+- Jangan mengirim data biometrik melalui jaringan.
+- Tambahkan fitur menghapus face profile.
+- Tangani profil yang rusak atau tidak tersedia.
+- Tangani library yang gagal diinisialisasi.
+- Jangan menampilkan traceback mentah kepada pengguna.
+- Simpan detail teknis ke logger lokal.
+- Tampilkan pesan error yang mudah dipahami.
+
+==================================================
+10. TESTING
+==================================================
+
+Uji skenario:
+1. Wajah presenter tidak ada.
+2. Wajah tidak dikenal.
+3. Wajah presenter dikenali.
+4. Wajah presenter hilang sementara.
+5. Wajah presenter hilang terlalu lama.
+6. Kamera terputus.
+7. Multiple faces.
+8. Profil wajah kosong.
+9. Profil wajah rusak.
+10. Gesture ketika LOCKED.
+11. Gesture ketika VERIFYING.
+12. Gesture ketika UNLOCKED.
+13. Status UNLOCKED berubah menjadi LOCKED tepat saat gesture terjadi.
+
+==================================================
+11. ACCEPTANCE CRITERIA
+==================================================
+
+1. Sistem memiliki fitur enrollment.
+2. Sistem dapat mencocokkan wajah presenter.
+3. Default status adalah LOCKED.
+4. Hanya identitas yang terdaftar yang dapat membuka gesture control.
+5. Status authentication diperbarui secara otomatis.
+6. Gesture ditolak ketika status tidak UNLOCKED.
+7. Kamera terputus menyebabkan lock langsung.
+8. UI menampilkan status keamanan aktual.
+9. Tidak ada operasi face recognition pada UI Thread.
+10. Seluruh fitur fase sebelumnya tetap berfungsi.
+
+==================================================
+12. OUTPUT
+==================================================
+
+Berikan:
+- Audit integrasi arsitektur.
+- File yang baru dibuat dan diperbarui.
+- Kode lengkap.
+- Penjelasan state machine.
+- Cara enrollment wajah.
+- Cara menguji kondisi LOCKED dan UNLOCKED.
+- Keterbatasan keamanan face recognition.
+- Cara menghapus profil wajah.
+
+Jangan melakukan refactor besar yang tidak diperlukan.
+Pastikan sistem siap untuk pengujian integrasi pada Fase 5.
+
+```
+
+**Catatan keamanan penting:** pencocokan wajah sederhana belum cukup untuk membuktikan bahwa orang di depan kamera adalah manusia asli. Untuk penggunaan yang lebih serius, tambahkan liveness detection yang benar-benar diuji. Selain itu, autentikasi wajah yang berhasil tidak otomatis membuktikan bahwa tangan yang terdeteksi adalah tangan presenter. Itulah alasan presenter zone atau keterkaitan posisi orang dan tangan perlu dipertimbangkan.
+
+## **Fase 5 — Integrasi Final, Optimasi, dan Packaging**
+
+
+
+Milestone 5
+
+Final Integration
+
+
+
+**Target:** seluruh komponen bekerja sebagai satu produk yang stabil dan siap digunakan untuk presentasi sungguhan.
+
+```
+
+Bertindaklah sebagai Lead Software Architect, Senior Python Developer, QA Engineer, dan Desktop Application Performance Engineer.
+
+Saya sudah menyelesaikan Fase 1 sampai Fase 4 pada proyek AI Presenter Control.
+
+Sekarang lakukan FINAL INTEGRATION, CODE REVIEW, DEBUGGING, PERFORMANCE OPTIMIZATION, DAN PACKAGING.
+
+Jangan langsung menulis ulang seluruh proyek.
+
+Audit terlebih dahulu semua modul yang telah dibuat, kemudian lakukan refactor hanya jika diperlukan.
+
+==================================================
+1. AUDIT ARSITEKTUR
+==================================================
+
+Periksa seluruh modul:
+- Main Window.
+- App State.
+- State Manager.
+- Camera Service.
+- Camera Worker.
+- Face Auth Service.
+- Face Auth Worker.
+- Gesture Service.
+- Hand Gesture Worker.
+- Gesture Controller.
+- PPTX Reader.
+- Thumbnail Service.
+- Presentation Controller.
+- PowerPoint COM Backend.
+- Keyboard Backend.
+
+Periksa:
+- Circular imports.
+- Duplicate functions.
+- Duplicate camera instances.
+- Shared state race condition.
+- Incorrect thread ownership.
+- Memory leak.
+- Resource leak.
+- Signal connections yang menumpuk.
+- Worker yang tidak dihentikan.
+- Exception yang tidak ditangani.
+
+==================================================
+2. THREADING DAN PERFORMANCE
+==================================================
+
+Pastikan:
+- UI berjalan pada Main Thread.
+- Camera capture tidak berjalan pada Main Thread.
+- Face recognition tidak berjalan pada Main Thread.
+- MediaPipe inference tidak berjalan pada Main Thread.
+- PPTX parsing tidak berjalan pada Main Thread.
+- Rendering thumbnail tidak berjalan pada Main Thread.
+- COM automation berjalan pada dedicated thread dengan COM initialization yang benar.
+
+Gunakan QObject worker + QThread.
+
+Hindari penggunaan QThread.terminate() sebagai mekanisme shutdown normal.
+
+Gunakan stop request, cleanup, thread quit, dan wait dengan batas waktu yang masuk akal.
+
+Pastikan kamera hanya dimiliki oleh satu Camera Worker.
+
+Gunakan latest-frame buffer agar processing tetap mengikuti frame terbaru.
+
+Optimalkan:
+- Camera FPS.
+- Face authentication sampling rate.
+- Hand detection sampling rate.
+- UI preview refresh rate.
+- Image conversion.
+- Thumbnail caching.
+
+Jangan mengoptimalkan dengan mengorbankan akurasi autentikasi maupun gesture.
+
+==================================================
+3. FINAL SECURITY GATE
+==================================================
+
+Buat satu sumber kebenaran untuk status keamanan.
+
+Perintah gestur hanya boleh dijalankan ketika semua kondisi benar:
+
+- Camera status = READY.
+- Face authentication status = UNLOCKED.
+- Gesture control = ENABLED.
+- Presentation status = READY.
+- Gesture event valid.
+- Cooldown selesai.
+- Tidak ada error aktif yang memblokir kendali.
+
+Periksa seluruh kondisi pada titik eksekusi perintah, bukan hanya pada event deteksi.
+
+Jika wajah tidak dikenali:
+- Jangan menjalankan perintah.
+- Ubah status menjadi LOCKED.
+
+Jika kamera terputus:
+- Blokir perintah seketika.
+
+Jika PowerPoint gagal dikendalikan:
+- Tampilkan error pada UI.
+- Jangan menganggap current slide berubah jika perintah gagal.
+
+==================================================
+4. PRESENTATION STATE SYNCHRONIZATION
+==================================================
+
+Pastikan current slide yang ditampilkan dashboard sesuai dengan posisi slide aktual PowerPoint sejauh backend mendukung verifikasi.
+
+Setelah Next/Previous:
+- Ambil posisi slide terbaru dari backend.
+- Update Current Slide.
+- Update Next Slide.
+- Update thumbnail.
+- Update speaker notes.
+
+Tangani kondisi:
+- Slide pertama.
+- Slide terakhir.
+- Presentasi ditutup secara eksternal.
+- Pengguna mengubah slide menggunakan keyboard.
+- PowerPoint tidak merespons.
+- Jendela slideshow tidak ditemukan.
+
+Jika backend keyboard tidak dapat mengetahui posisi aktual, tampilkan kondisi sinkronisasi sebagai estimated atau unknown, bukan mengaku presisi.
+
+==================================================
+5. UI/UX FINAL REFINEMENT
+==================================================
+
+Lakukan pemeriksaan seluruh dashboard.
+
+Pastikan:
+- Status LOCKED mudah dikenali.
+- Status UNLOCKED jelas.
+- Speaker notes menjadi informasi paling mudah dibaca.
+- Current Slide dan Next Slide mudah dibandingkan.
+- Preview tidak mengalami flicker berlebihan.
+- Tidak ada widget bertumpuk.
+- Layout tetap rapi pada berbagai resolusi.
+- Button memiliki disabled state yang jelas.
+- Error memiliki feedback visual yang konsisten.
+- Loading indicator tersedia pada operasi yang membutuhkan waktu.
+- Tidak terdapat informasi debug pada dashboard utama.
+
+Tambahkan:
+- Keyboard shortcuts untuk kontrol manual.
+- Pengaturan camera index.
+- Pengaturan gesture threshold.
+- Pengaturan cooldown.
+- Pengaturan face matching threshold.
+- Pilihan backend PowerPoint.
+
+Kontrol manual melalui UI tetap dapat digunakan meskipun gesture sedang LOCKED, selama pengguna memang mengoperasikan aplikasi secara langsung.
+
+==================================================
+6. CONFIGURATION DAN LOGGING
+==================================================
+
+Simpan konfigurasi dalam satu tempat.
+
+Contoh konfigurasi:
+- camera_index
+- camera_width
+- camera_height
+- target_camera_fps
+- face_check_interval
+- face_match_threshold
+- verification_frames
+- face_loss_grace_period
+- swipe_distance_threshold
+- swipe_velocity_threshold
+- gesture_cooldown
+- preferred_presentation_backend
+
+Jangan hardcode konfigurasi di banyak file.
+
+Buat logging dengan level:
+- DEBUG.
+- INFO.
+- WARNING.
+- ERROR.
+- CRITICAL.
+
+Catat:
+- Camera connection.
+- Face authentication state.
+- Gesture detection event.
+- Gesture rejection reason.
+- Presentation command.
+- Slide synchronization.
+- Thread lifecycle.
+- Exception.
+
+Jangan mencatat frame mentah, password, atau data biometrik mentah ke log.
+
+==================================================
+7. TESTING DAN QUALITY ASSURANCE
+==================================================
+
+Buat automated test untuk logika utama.
+
+Uji:
+- PPTX reader.
+- Notes extraction.
+- Slide navigation boundaries.
+- Gesture classifier.
+- Cooldown.
+- Authentication state transition.
+- Security gate.
+- Camera failure.
+- Presentation backend error.
+
+Buat integration test dengan mock camera dan mock PowerPoint backend agar pengujian tidak selalu memerlukan webcam dan Microsoft PowerPoint sungguhan.
+
+Buat juga manual testing checklist untuk pengujian:
+- Webcam nyata.
+- Presentasi dengan 3 sampai 5 slide.
+- Speaker notes.
+- Swipe kiri/kanan.
+- Wajah presenter.
+- Kondisi wajah hilang.
+- Kamera terputus.
+- Presentasi tertutup saat aplikasi berjalan.
+
+==================================================
+8. SHUTDOWN DAN RESOURCE CLEANUP
+==================================================
+
+Saat aplikasi ditutup:
+
+1. Matikan penerimaan gesture.
+2. Hentikan Face Auth Worker.
+3. Hentikan Hand Gesture Worker.
+4. Hentikan Camera Worker.
+5. Lepaskan VideoCapture.
+6. Hentikan Presentation Worker.
+7. Lepaskan objek COM jika digunakan.
+8. Tutup resource yang masih terbuka.
+9. Tunggu worker berhenti secara graceful.
+10. Baru tutup aplikasi.
+
+Jangan sampai proses Python masih tertinggal setelah jendela utama ditutup.
+
+==================================================
+9. PACKAGING
+==================================================
+
+Siapkan proyek agar dapat dibuat menjadi desktop executable menggunakan PyInstaller.
+
+Perhatikan:
+- Model MediaPipe harus ikut dibundel atau memiliki mekanisme external asset path.
+- File konfigurasi dapat diakses setelah aplikasi dibundel.
+- Icon aplikasi.
+- Cache thumbnail.
+- Folder data profil wajah.
+- Dependency native seperti OpenCV dan face_recognition.
+- Dependency platform-specific untuk PowerPoint COM.
+
+Jangan mengasumsikan PowerPoint COM tersedia di semua OS.
+
+Buat instruksi packaging sesuai target sistem operasi.
+
+==================================================
+10. ACCEPTANCE CRITERIA
+==================================================
+
+Proyek final harus memenuhi:
+
+1. Dashboard terbuka tanpa error.
+2. PPTX dapat dimuat.
+3. Current dan Next Slide akurat sesuai kemampuan backend.
+4. Speaker notes ditampilkan.
+5. Webcam berjalan.
+6. MediaPipe mendeteksi swipe.
+7. Face authentication bekerja.
+8. Gesture hanya aktif saat UNLOCKED.
+9. Wajah hilang menyebabkan sistem kembali LOCKED.
+10. Gesture tidak menghasilkan double navigation.
+11. UI tidak freeze selama AI processing.
+12. PowerPoint error tidak membuat seluruh aplikasi crash.
+13. Semua worker dapat dihentikan.
+14. Kamera dilepaskan saat aplikasi ditutup.
+15. Aplikasi bisa dipersiapkan untuk packaging.
+
+==================================================
+11. OUTPUT FINAL
+==================================================
+
+Berikan hasil dalam format:
+
+A. Executive Summary.
+B. Arsitektur final.
+C. Daftar seluruh bug dan masalah yang ditemukan.
+D. Perbaikan yang diterapkan.
+E. Daftar file yang diubah.
+F. Kode lengkap untuk file yang berubah.
+G. Testing report.
+H. Performance dan concurrency review.
+I. Security limitations.
+J. Packaging instructions.
+K. Known issues yang masih perlu diperbaiki.
+
+Jangan mengklaim sebuah pengujian berhasil jika belum benar-benar dijalankan.
+
+Jika suatu pengujian membutuhkan webcam fisik atau Microsoft PowerPoint yang tidak tersedia, tandai sebagai NOT TESTED dan jelaskan cara mengujinya secara manual.
+
+Prioritaskan stabilitas, keamanan, akurasi navigasi, dan pengalaman pengguna.
+
+```
+
+## **6. Keputusan teknis yang sebaiknya dipertahankan**
+
+Ada beberapa hal yang menurut saya sangat penting untuk mencegah aplikasi mengalami masalah ketika seluruh modul sudah terintegrasi.
+
+### **A. Jangan membuka webcam dari beberapa worker**
+
+Gunakan satu `CameraWorker` sebagai pemilik `cv2.VideoCapture`.
+
+\#chatgpt-mermaid-\_r_ub\_{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;fill:rgb(237, 237, 237);}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#chatgpt-mermaid-\_r_ub\_ .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_ub\_ .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#chatgpt-mermaid-\_r_ub\_ .error-icon{fill:rgb(48, 48, 48);}#chatgpt-mermaid-\_r_ub\_ .error-text{fill:rgb(237, 237, 237);stroke:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ .edge-thickness-normal{stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .edge-thickness-thick{stroke-width:3.5px;}#chatgpt-mermaid-\_r_ub\_ .edge-pattern-solid{stroke-dasharray:0;}#chatgpt-mermaid-\_r_ub\_ .edge-thickness-invisible{stroke-width:0;fill:none;}#chatgpt-mermaid-\_r_ub\_ .edge-pattern-dashed{stroke-dasharray:3;}#chatgpt-mermaid-\_r_ub\_ .edge-pattern-dotted{stroke-dasharray:2;}#chatgpt-mermaid-\_r_ub\_ .marker{fill:rgb(175, 175, 175);stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_ub\_ .marker.cross{stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_ub\_ svg{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:16px;}#chatgpt-mermaid-\_r_ub\_ p{margin:0;}#chatgpt-mermaid-\_r_ub\_ .label{font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ .cluster-label text{fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ .cluster-label span{color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ .cluster-label span p{background-color:transparent;}#chatgpt-mermaid-\_r_ub\_ .label text,#chatgpt-mermaid-\_r_ub\_ span{fill:rgb(237, 237, 237);color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ .node rect,#chatgpt-mermaid-\_r_ub\_ .node circle,#chatgpt-mermaid-\_r_ub\_ .node ellipse,#chatgpt-mermaid-\_r_ub\_ .node polygon,#chatgpt-mermaid-\_r_ub\_ .node path{fill:rgb(9, 23, 44);stroke:rgb(31, 78, 148);stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .rough-node .label text,#chatgpt-mermaid-\_r_ub\_ .node .label text,#chatgpt-mermaid-\_r_ub\_ .image-shape .label,#chatgpt-mermaid-\_r_ub\_ .icon-shape .label{text-anchor:middle;}#chatgpt-mermaid-\_r_ub\_ .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .rough-node .label,#chatgpt-mermaid-\_r_ub\_ .node .label,#chatgpt-mermaid-\_r_ub\_ .image-shape .label,#chatgpt-mermaid-\_r_ub\_ .icon-shape .label{text-align:center;}#chatgpt-mermaid-\_r_ub\_ .node.clickable{cursor:pointer;}#chatgpt-mermaid-\_r_ub\_ .root .anchor path{fill:rgb(175, 175, 175)!important;stroke-width:0;stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_ub\_ .arrowheadPath{fill:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_ub\_ .edgePath .path{stroke:rgb(175, 175, 175);stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .flowchart-link{stroke:rgb(175, 175, 175);fill:none;}#chatgpt-mermaid-\_r_ub\_ .edgeLabel{background-color:rgb(0, 0, 0);text-align:center;}#chatgpt-mermaid-\_r_ub\_ .edgeLabel p{background-color:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_ub\_ .edgeLabel rect{opacity:0.5;background-color:rgb(0, 0, 0);fill:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_ub\_ .labelBkg{background-color:rgba(0, 0, 0, 0.5);}#chatgpt-mermaid-\_r_ub\_ .cluster rect{fill:rgb(48, 48, 48);stroke:rgba(255, 255, 255, 0.15);stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .cluster text{fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ .cluster span{color:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";font-size:12px;background:rgb(48, 48, 48);border:1px solid rgba(255, 255, 255, 0.15);border-radius:2px;pointer-events:none;z-index:100;}#chatgpt-mermaid-\_r_ub\_ .flowchartTitleText{text-anchor:middle;font-size:18px;fill:rgb(237, 237, 237);}#chatgpt-mermaid-\_r_ub\_ rect.text{fill:none;stroke-width:0;}#chatgpt-mermaid-\_r_ub\_ .icon-shape,#chatgpt-mermaid-\_r_ub\_ .image-shape{background-color:rgb(0, 0, 0);text-align:center;}#chatgpt-mermaid-\_r_ub\_ .icon-shape p,#chatgpt-mermaid-\_r_ub\_ .image-shape p{background-color:rgb(0, 0, 0);padding:2px;}#chatgpt-mermaid-\_r_ub\_ .icon-shape .label rect,#chatgpt-mermaid-\_r_ub\_ .image-shape .label rect{opacity:0.5;background-color:rgb(0, 0, 0);fill:rgb(0, 0, 0);}#chatgpt-mermaid-\_r_ub\_ .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#chatgpt-mermaid-\_r_ub\_ .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#chatgpt-mermaid-\_r_ub\_ .node .neo-node{stroke:rgb(31, 78, 148);}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node rect,#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].cluster rect,#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node polygon{stroke:url(#chatgpt-mermaid-\_r_ub\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].swimlane.cluster rect{filter:none;}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node path{stroke:url(#chatgpt-mermaid-\_r_ub\_-gradient);stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node .neo-line path{stroke:rgb(31, 78, 148);filter:none;}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node circle{stroke:url(#chatgpt-mermaid-\_r_ub\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].node circle .state-start{fill:#000000;}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].icon-shape .icon{fill:url(#chatgpt-mermaid-\_r_ub\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_ub\_ [data-look="neo"].icon-shape .icon-neo path{stroke:url(#chatgpt-mermaid-\_r_ub\_-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#chatgpt-mermaid-\_r_ub\_ .node text{font-size:14px;font-weight:600;letter-spacing:normal;fill:rgb(153, 206, 255);}#chatgpt-mermaid-\_r_ub\_ .edgeLabels text{font-size:13px;font-weight:600;letter-spacing:-0.08px;fill:rgb(153, 206, 255);}#chatgpt-mermaid-\_r_ub\_ .node tspan[font-weight="normal"],#chatgpt-mermaid-\_r_ub\_ .edgeLabels tspan[font-weight="normal"]{font-weight:600;}#chatgpt-mermaid-\_r_ub\_ .edgeLabel .label rect{opacity:1;rx:13px;ry:13px;fill:rgb(0, 14, 26);stroke:rgb(26, 62, 95);stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .node rect,#chatgpt-mermaid-\_r_ub\_ .node circle,#chatgpt-mermaid-\_r_ub\_ .node ellipse,#chatgpt-mermaid-\_r_ub\_ .node polygon,#chatgpt-mermaid-\_r_ub\_ .node path{fill:rgb(0, 40, 77);stroke:rgba(255, 255, 255, 0.1);stroke-width:1px;}#chatgpt-mermaid-\_r_ub\_ .node rect{rx:16px;ry:16px;}#chatgpt-mermaid-\_r_ub\_ .mermaid-decision .label-container{fill:rgb(0, 14, 26);stroke:rgb(26, 62, 95);stroke-dasharray:2,2;}#chatgpt-mermaid-\_r_ub\_ .edgePaths .flowchart-link{stroke:rgb(175, 175, 175);stroke-width:1px;stroke-linecap:round;stroke-linejoin:round;}#chatgpt-mermaid-\_r_ub\_ .marker{fill:rgb(175, 175, 175);stroke:rgb(175, 175, 175);}#chatgpt-mermaid-\_r_ub\_ :root{--mermaid-font-family:-apple-system-body,ui-sans-serif,-apple-system,system-ui,"Segoe UI",Helvetica,"Apple Color Emoji",Arial,sans-serif,"Segoe UI Emoji","Segoe UI Symbol";}WebcamCamera WorkerLatest Frame BufferFace Auth WorkerHand Gesture WorkerCamera Preview UI
+
+Ini menghindari konflik akses kamera dan membuat Face Authentication serta Hand Gesture bekerja menggunakan sumber gambar yang sama.
+
+### **B. Jangan biarkan AI mengendalikan PowerPoint secara langsung**
+
+Gunakan pola:
+
+`AI Detection → Gesture Controller → Security Check → Presentation Controller`
+
+Dengan demikian, MediaPipe tidak perlu mengetahui bagaimana PowerPoint bekerja. Begitu pula Face Recognition tidak perlu mengetahui cara mengirim tombol keyboard.
+
+### **C. Gunakan PowerPoint COM untuk sinkronisasi yang lebih baik**
+
+Saya menyarankan urutan backend berikut:
+
+1. **PowerPoint COM:** pilihan utama untuk lingkungan Windows dengan Microsoft PowerPoint terpasang. Lebih baik untuk memperoleh posisi slide aktual.
+2. **PyAutoGUI:** alternatif untuk mengirim tombol keyboard, tetapi perlu memastikan jendela PowerPoint adalah target dan posisi slide dapat tersinkronisasi.
+
+Jangan mengklaim nomor slide selalu akurat ketika backend hanya mengirim tombol keyboard tanpa dapat membaca posisi PowerPoint.
+
+### **D. Speaker notes harus menjadi prioritas dashboard**
+
+Untuk aplikasi presenter, speaker notes bukan informasi tambahan. Justru bagian ini menjadi salah satu fungsi utamanya.
+
+Saya merekomendasikan tampilan final seperti berikut.
+
+**AI PRESENTER CONTROL**
+
+Presentation Dashboard
+
+SYSTEM ONLINE
+
+**FACE AUTHENTICATION**
+
+Presenter not verified
+
+LOCKED
+
+**CURRENT SLIDE**
+
+[蓝色简约风电子信息工程专业开题答辩PPT模板-iSlide](https://images.openai.com/static-rsc-4/rsT9tKwz7ZL2CG8z3t2TIr5zb_bGh-F_VJnH_XnxDv2HM_C3-LAvKwrJ-3Hg1eX_Yn6uzBfKpVvPJxPendIHgjE_7PbIVNtqtEhtkBxBMAC-SaJumMx00dSIburTQFOcKg-KcuHyZn6g7HK9thSXbRJRk5sMHewIrFrDgbgJCto?purpose=inline)
+
+**Introduction**
+
+Slide 01 / 15
+
+**NEXT SLIDE**
+
+[Biology Thesis Presentation for PowerPoint and Google Slides - PPT Slides](https://images.openai.com/static-rsc-4/QdwKnKshDniwIHjK2VAahFzUNwqkdFgKk1WPOp-1aS0iouHzwFH4b1jTnasJkEasar-iSBi_4_QuKANGQrZGQJ6E2Kz9b25R2lHr5_58s_Utp6nMRNZvYWJLHmKNwhFnWJnnpFq8KZJpeXmo0R5oCtYwK5jKIA4cuF-hphsU2uA?purpose=inline)
+
+**Research Objective**
+
+Slide 02 / 15
+
+**SPEAKER NOTES**
+
+CURRENT SLIDE
+
+# **INTRODUCTION**
+
+# **Research Background**
+
+## **Problem Statement**
+
+## **Research Objectives**
+
+Contoh tampilan kata kunci. Data sebenarnya berasal dari PPTX.
+
+CAMERA: CONNECTED
+
+GESTURE: DISABLED
+
+Ilustrasi konsep dashboard; preview slide final harus menggunakan thumbnail PPTX yang sebenarnya.
+
+### **E. Pastikan proses membaca notes tidak mengubah dokumen**
+
+Dalam implementasinya, programmer perlu memeriksa `slide.has_notes_slide` sebelum mengakses `slide.notes_slide`. Dokumentasi python-pptx menjelaskan bahwa mengakses `slide.notes_slide` dapat membuat notes slide baru ketika sebelumnya belum tersedia.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://python-pptx.readthedocs.io\&sz=32)
+
+python-pptx 1.0.0 documentation
+
+
+
+## **7. Urutan pengerjaan yang saya rekomendasikan**
+
+Supaya Gemini tidak menghasilkan kode yang saling bertentangan, gunakan prosedur berikut:
+
+| Urutan | Yang dilakukan                              | Hasil yang harus disimpan   |
+| ------ | ------------------------------------------- | --------------------------- |
+| 1      | Kirim Prompt Fase 1                         | Dashboard berjalan          |
+| 2      | Uji dashboard, simpan versi kode            | Checkpoint 1                |
+| 3      | Kirim Prompt Fase 2                         | PPTX dan notes berfungsi    |
+| 4      | Uji dengan PPTX sungguhan                   | Checkpoint 2                |
+| 5      | Kirim Prompt Fase 3                         | Swipe dapat mengganti slide |
+| 6      | Uji beberapa kali gesture                   | Checkpoint 3                |
+| 7      | Kirim Prompt Fase 4                         | Face lock berfungsi         |
+| 8      | Uji kondisi wajah dikenal dan tidak dikenal | Checkpoint 4                |
+| 9      | Kirim Prompt Fase 5                         | Aplikasi terintegrasi       |
+
+**Saran tambahan:** setelah setiap fase berhasil, simpan perubahan ke Git dengan commit terpisah. Jangan mengizinkan Gemini mengganti seluruh proyek hanya karena ingin menambahkan satu fitur.
+
+## **8. Kesimpulan arsitektur**
+
+Menurut saya, kombinasi paling tepat untuk proyek ini adalah:
+
+**PySide6**
+
+UI Framework
+
+**OpenCV + MediaPipe**
+
+Pengambilan gambar dan pengenalan gerakan tangan.
+
+**face_recognition**
+
+Pengenalan identitas presenter dan penguncian kendali gestur.
+
+**python-pptx**
+
+Membaca informasi slide dan speaker notes.
+
+**PowerPoint COM / PyAutoGUI**
+
+Pengendalian presentasi dan sinkronisasi slide.
+
+**QThread + QObject + Signals/Slots**
+
+Memisahkan pekerjaan berat dari UI agar aplikasi tetap responsif.
+
+Hal paling penting: **bangun dashboard terlebih dahulu, pastikan PowerPoint bekerja, kemudian integrasikan gesture, dan terakhir face authentication.** Dengan urutan ini, jika terjadi masalah, kamu dapat mengetahui modul mana yang menjadi sumber masalah tanpa harus membongkar seluruh aplikasi.

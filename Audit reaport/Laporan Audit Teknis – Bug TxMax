@@ -1,0 +1,217 @@
+Laporan Audit Teknis – Bug TxMax dan Tmax/Tmin
+Repository: oh-kang-woo/STAMET-BMKG--SABANG
+
+Branch yang diperiksa: main
+Critical – Kesalahan pemetaan variabel suhu
+1. Temuan utama: Penyebab TxMax mengambil suhu bola kering
+Saya menemukan kesalahan pemetaan secara langsung pada file berikut:
+
+File: app/Services/AwosToAwsBridgeService.php
+
+Fungsi: syncRecord(DataAwos $awos)
+
+Lokasi: Baris 67–78, terutama baris 68–70.
+
+Temuan paling penting adalah:
+Baris	Variabel database	Sumber nilai
+60	temp_drybulb_c_tttttt	$awos->at_5m_c
+68–69	temp_max_c_txtxtx (TxMax)	$awos->at_5m_c
+74–75	temp_min_c_tntntn (TnMin)	$awos->at_5m_c
+
+Akar masalah:
+
+Variabel $awos->at_5m_c merupakan suhu udara dari sensor AWOS. Nilai tersebut memang digunakan untuk mengisi suhu bola kering (temp_drybulb_c_tttttt).
+
+Namun, pada baris 69, nilai yang sama juga dimasukkan ke kolom temp_max_c_txtxtx.
+
+Artinya, sistem memperlakukan suhu udara pada satu waktu pengamatan seolah-olah merupakan suhu maksimum.
+
+Kesalahan serupa terjadi pada baris 75 untuk suhu minimum.
+
+Ini merupakan kesalahan pemetaan variabel yang dapat dibuktikan langsung dari kode, bukan sekadar dugaan berdasarkan gejala.
+
+Referensi: AwosToAwsBridgeService.php.
+2. Analisis alur kesalahan
+Berdasarkan penelusuran kode, alurnya adalah sebagai berikut:
+Data sensor AWOS
+
+at_5m_c – suhu bola kering
+
+
+AwosToAwsBridgeService.php
+
+syncRecord()
+
+
+Dry Bulb
+
+temp_drybulb_c_tttttt
+Pemetaan sesuai
+
+
+TxMax
+
+temp_max_c_txtxtx
+Pemetaan salah
+
+
+
+TnMin
+
+temp_min_c_tntntn
+Pemetaan juga salah
+
+
+Kesimpulannya, apabila Bridge AWOS ke AWS aktif, nilai suhu maksimum dan minimum pada tabel data_aws berpotensi berisi suhu udara sesaat, bukan hasil pengamatan ekstrem selama periode yang ditentukan.
+3. Audit logika Tmax dan Tmin selama 24 jam
+High – Logika periode 24 jam belum ditemukan
+Saya menemukan masalah kedua yang tidak kalah penting: proses pengiriman data AWS ke server Sinoptik hanya mengambil satu rekaman suhu, bukan menghitung suhu tertinggi atau terendah selama 24 jam.
+A. File app/Helpers/SinoptikDataHelper.php
+Fungsi: sendDataAwsToServerSinoptik()
+
+Lokasi: Baris 452–495.
+
+Pada baris 455–460 terdapat proses:
+1. Menentukan waktu target pengiriman.
+2. Mengurangi waktu target satu jam.
+3. Mencari satu record AWS berdasarkan timestamp tersebut.
+Bagian paling penting adalah baris 459–460:
+$referenceTime = $targetTime->copy()->subHour();
+$dataAws = DataAws::where('data_timestamp', $referenceTime->format('Y-m-d H:i:s'))->first();
+
+
+Artinya, sistem mengambil satu data AWS berdasarkan waktu tertentu.
+
+Kemudian pada baris 487–488:
+'temp_max_c_txtxtx' => $dataAws->temp_max_c_txtxtx,
+'temp_min_c_tntntn' => $dataAws->temp_min_c_tntntn,
+
+
+Kedua nilai tersebut langsung diteruskan tanpa perhitungan ulang.
+
+Temuan: Tidak ditemukan proses pencarian nilai MAX() untuk Tmax maupun MIN() untuk Tmin berdasarkan rentang 24 jam.
+
+Perlu diperhatikan bahwa fungsi whereBetween() memang ada pada file tersebut, tetapi penggunaannya di baris 497–504 hanya untuk menghitung curah hujan tiga jam (rainfall_last_mm), bukan suhu maksimum dan minimum.
+
+Referensi: SinoptikDataHelper.php – baris 452–504.
+B. File routes/console.php
+Lokasi: Baris 37–55.
+
+Ditemukan bahwa Bridge AWOS ke AWS dijalankan setiap menit:
+- Mengambil lima record AWOS terbaru.
+- Memproses setiap record menggunakan syncRecord().
+- Menyimpan atau memperbarui data pada tabel data_aws.
+Tidak ditemukan mekanisme agregasi suhu maksimum/minimum selama 24 jam ataupun mekanisme reset khusus pada pukul 12 UTC dan 00 UTC.
+
+Referensi: routes/console.php – baris 37–55.
+4. Pemeriksaan mekanisme reset berdasarkan SOP
+Berikut perbandingan aturan yang diminta dengan implementasi yang ditemukan.
+Ketentuan SOP	Implementasi dalam repository	Status
+Tmax dihitung dari 12 UTC kemarin sampai 12 UTC hari ini	Tidak ditemukan agregasi periode tersebut	Tidak sesuai
+Tmax menyimpan suhu tertinggi	Diisi dengan suhu AWOS sesaat	Tidak sesuai
+Tmax di-reset setelah 12 UTC	Tidak ditemukan mekanisme reset	Tidak ditemukan
+Tmin dihitung dari 00 UTC kemarin sampai 00 UTC hari ini	Tidak ditemukan agregasi periode tersebut	Tidak sesuai
+Tmin menyimpan suhu terendah	Diisi dengan suhu AWOS sesaat	Tidak sesuai
+Tmin di-reset setelah 00 UTC	Tidak ditemukan mekanisme reset	Tidak ditemukan
+
+Pemeriksaan waktu UTC
+Saya juga memeriksa config/app.php, tepatnya baris 68.
+
+Pengaturan timezone aplikasi adalah:
+
+'timezone' => 'UTC'
+
+Jadi, aplikasi memang dikonfigurasi menggunakan UTC. Permasalahan utamanya bukan pada konfigurasi zona waktu.
+
+Selanjutnya, pada app/Helpers/DateHelper.php, fungsi getNearestSentHour() di baris 10–21 menentukan timestamp observasi berdasarkan menit saat fungsi dijalankan.
+
+Pada scheduler routes/console.php baris 191–194, pengiriman data AWS dilakukan:
+- Menit 53 apabila Bridge AWOS aktif.
+- Menit 51 apabila Bridge AWOS tidak aktif.
+Ketika Bridge aktif, mekanisme timestamp tersebut digunakan untuk mengambil data pada menit ke-50 satu jam sebelumnya.
+
+Kesimpulan pemeriksaan waktu: Penentuan timestamp pengamatan sudah menggunakan acuan UTC, tetapi hal itu tidak sama dengan penentuan periode Tmax/Tmin selama 24 jam. Tidak ada logika khusus yang mengatur periode 12–12 UTC atau 00–00 UTC pada alur perhitungan suhu yang diperiksa.
+
+Referensi:
+- config/app.php
+- DateHelper.php
+- routes/console.php
+5. Dampak terhadap SYNOP, METAR, dan TAF
+Ada beberapa hal penting yang perlu dipisahkan agar penyebab kegagalan pengiriman tidak salah disimpulkan.
+
+A. SYNOP
+
+File app/Console/Commands/GenerateGtsSinoptik.php, fungsi handle(), mengambil record DataSinoptik berdasarkan timestamp.
+
+Selanjutnya, SinoptikComposer.php meneruskan nilai encoded_synop ke helper untuk membentuk header dan pesan SYNOP.
+
+Dengan demikian, aplikasi Laravel ini tidak melakukan perhitungan Tmax secara langsung saat membentuk pesan SYNOP. Nilai yang diterima dari proses pembentukan data sebelumnya akan diteruskan.
+
+Referensi:
+- GenerateGtsSinoptik.php
+- SinoptikComposer.php
+B. METAR
+
+File app/Services/MetarComposer.php, baris 31–32, mengambil:
+- temp_drybulb_c_tttttt untuk temperatur udara.
+- temp_dewpoint_c_tdtdtd untuk titik embun.
+Tidak ditemukan penggunaan variabel TxMax maupun Tmin dalam pembentukan METAR.
+
+Artinya, kesalahan pemetaan TxMax bukan penyebab langsung yang terbukti dari kode pembentukan METAR. Kegagalan METAR pada jam 12 UTC perlu diperiksa tersendiri pada proses pembentukan dan pengiriman GTS.
+
+Referensi: MetarComposer.php.
+
+C. TAF
+
+Pada repository ini, saya menemukan modul TafVerificationController.php dan BmkgAviationApiService.php.
+
+Modul tersebut berfungsi mengambil TAF dan METAR dari portal BMKG untuk proses verifikasi serta pembuatan laporan Excel.
+
+Saya tidak menemukan penjadwalan gts:generate-taf pada routes/console.php. Dengan demikian, jalur TAF yang ditemukan di repository bukan implementasi pembentukan dan pengiriman sandi TAF secara otomatis.
+
+Referensi:
+- TafVerificationController.php
+- BmkgAviationApiService.php
+- routes/web.php
+6. Kesimpulan akhir audit
+Daftar temuan berdasarkan prioritas
+Critical
+Kesalahan pemetaan TxMax
+
+AwosToAwsBridgeService.php, fungsi syncRecord(), baris 68–70. Suhu bola kering dimasukkan ke kolom suhu maksimum.
+
+
+
+Critical
+Kesalahan pemetaan Tmin
+
+AwosToAwsBridgeService.php, baris 74–78. Suhu bola kering juga dimasukkan ke kolom suhu minimum.
+
+
+
+High
+Tidak ada perhitungan ekstrem 24 jam
+
+SinoptikDataHelper.php, fungsi sendDataAwsToServerSinoptik(), baris 452–495. Sistem hanya mengambil satu record AWS.
+
+
+
+High
+Mekanisme reset Tmax/Tmin tidak ditemukan
+
+Tidak ditemukan logika pergantian periode atau reset pada pukul 12 UTC dan 00 UTC dalam alur pengolahan suhu yang diperiksa.
+
+
+
+Perlu investigasi terpisah
+Kegagalan pengiriman METAR dan TAF
+
+Kesalahan TxMax belum cukup untuk menjelaskan kegagalan ketiga produk sekaligus. Jalur pengiriman GTS dan sistem eksternal perlu diperiksa tersendiri.
+
+
+
+Catatan batas audit: Repository Laravel ini berkomunikasi dengan server Excel eksternal melalui excel_server_url, khususnya endpoint /sinoptik/input. Kode aplikasi Excel eksternal tersebut tidak tersedia dalam repository yang diperiksa. Oleh karena itu, audit ini memastikan kesalahan yang terdapat pada sisi Laravel, tetapi tidak dapat memastikan apakah terdapat kesalahan tambahan pada aplikasi Excel.
+
+Rekomendasi fokus untuk tahap perbaikan: Prioritaskan pemeriksaan AwosToAwsBridgeService.php dan SinoptikDataHelper.php, khususnya pemisahan suhu aktual, suhu maksimum, serta suhu minimum, termasuk penentuan periode observasi dan reset berdasarkan UTC.
+
+"Laporan audit selesai. Silakan salin hasil temuan ini dan berikan kembali ke Gemini agar Gemini yang menuliskan kode perbaikannya untuk Anda."
